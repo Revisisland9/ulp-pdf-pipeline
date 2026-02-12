@@ -159,6 +159,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(itab)
 
+    # Extra space before NOTE
     story.append(Spacer(1, 0.30 * inch))
 
     # ---------------- NOTE BAR ----------------
@@ -175,39 +176,46 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(note_tbl)
 
-    story.append(Spacer(1, 0.06 * inch))
-    story.append(Paragraph(
-        "Received, subject to the agreement between the Carrier and listed Third Party...",
-        styles["FinePrint"]
-    ))
-
-    # FLEXIBLE SPACER TO PUSH SIGNATURES TO BOTTOM
-    story.append(Spacer(1, 9999))
-
-    # ---------------- SIGNATURE SECTION (BOTTOM OF PAGE) ----------------
-    story.append(Paragraph(
-        "This is to certify that the above named materials are properly classified, described, "
-        "packaged, marked and labeled, and are in proper condition for transportation according "
-        "to the applicable regulations of the Department of Transportation.",
-        styles["FinePrint"]
-    ))
     story.append(Spacer(1, 0.08 * inch))
+
+    story.append(Paragraph(
+        "Received, subject to the agreement between the Carrier and listed Third Party. In effect on the date of shipment "
+        "Carrier agrees that listed Third Party is the sole payer of the corresponding freight bill. "
+        "This Bill of Lading is not subject to any tariffs or classifications, whether individually determined of filed with any federal "
+        "or state regulatory agency, except as specifically agreed to in writing by the listed Third Party and Carrier.",
+        styles["FinePrint"]
+    ))
+
+    # ----------- Controlled spacing before signatures -----------
+    story.append(Spacer(1, 0.50 * inch))
+
+    # ---------------- SHIPPER CERTIFICATION ----------------
+    story.append(Paragraph(
+        "This is to certify that the above named materials are properly classified, described, packaged, marked and labeled, "
+        "and are in proper condition for transportation according to the applicable regulations of the Department of Transportation.",
+        styles["FinePrint"]
+    ))
+
+    story.append(Spacer(1, 0.10 * inch))
 
     story.append(Table(
         [["Shipper Signature: ________________________________", "Date: ________________"]],
         colWidths=[5.3 * inch, 1.9 * inch],
     ))
 
-    story.append(Spacer(1, 0.20 * inch))
+    story.append(Spacer(1, 0.25 * inch))
 
     story.append(Paragraph(
-        "Carrier acknowledges receipt of packages and required four (4) placards...",
+        "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies emergency response "
+        "information was made available and/or carrier has the Department of Transportation emergency response guidebook "
+        "or equivalent documentation in vehicle. Property described above is received in good order, except as noted.",
         styles["FinePrint"]
     ))
-    story.append(Spacer(1, 0.08 * inch))
+
+    story.append(Spacer(1, 0.10 * inch))
 
     story.append(Table(
-        [["Driver Signature: ________________________________", "Date: ________________"]],
+        [["Driver Signature:  ________________________________", "Date: ________________"]],
         colWidths=[5.3 * inch, 1.9 * inch],
     ))
 
