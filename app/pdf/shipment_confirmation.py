@@ -75,7 +75,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         )
     )
 
-    # NOTE bar style (white on black)
+    # NOTE bar style (white on black) — bold
     styles.add(
         ParagraphStyle(
             name="NoteBar",
@@ -83,6 +83,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
             fontSize=9,
             leading=11,
             textColor=colors.white,
+            fontName="Helvetica-Bold",
         )
     )
 
@@ -94,13 +95,18 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     story.append(Paragraph("BILL OF LADING", styles["BolTitle"]))
 
-    left = f"<b>Primary Reference:</b> {pref}" if pref else "<b>Primary Reference:</b> —"
-    date_str = pickup_date if pickup_date else "—"
-    right = f"<b>Date:</b> {date_str}<br/><b>Terms:</b> Third Party Prepaid"
+    # Primary Reference, Date, Terms all on ONE row (no stacking)
+    pr_text = f"<b>Primary Reference:</b> {pref}" if pref else "<b>Primary Reference:</b> —"
+    dt_text = f"<b>Date:</b> {pickup_date}" if pickup_date else "<b>Date:</b> —"
+    terms_text = "<b>Terms:</b> Third Party Prepaid"
 
     header_tbl = Table(
-        [[Paragraph(left, styles["BolHeader"]), Paragraph(right, styles["BolHeader"])]],
-        colWidths=[3.6 * inch, 3.6 * inch],
+        [[
+            Paragraph(pr_text, styles["BolHeader"]),
+            Paragraph(dt_text, styles["BolHeader"]),
+            Paragraph(terms_text, styles["BolHeader"]),
+        ]],
+        colWidths=[2.8 * inch, 2.2 * inch, 2.2 * inch],  # totals 7.2 in
     )
     header_tbl.setStyle(
         TableStyle(
@@ -154,7 +160,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
             [
                 Paragraph("<b>Shipper</b>", styles["Normal"]),
                 Paragraph("<b>Consignee</b>", styles["Normal"]),
-                Paragraph("<b>Bill To</b>", styles["Normal"]),  # changed from "THR Bill To"
+                Paragraph("<b>Bill To</b>", styles["Normal"]),
             ],
             [
                 Paragraph(party_block(shipper, include_residential=True), styles["Small"]),
@@ -177,9 +183,8 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     )
     story.append(parties_table)
 
-    # ---------------- REFERENCES (no black bar, no Primary column) on RIGHT HALF under parties ----------------
+    # ---------------- REFERENCES (filtered: no Job name / Load number) ----------------
     refs_all = req.get("ReferenceNumbers") or []
-    # PDF-only: remove Job name / Load number
     refs = [r for r in refs_all if not _exclude_reference_type_pdf_(s(r.get("Type")))]
 
     if refs:
@@ -253,9 +258,11 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         )
         story.append(itab)
 
-    # ---------------- NOTE BAR + FINE PRINT BLOCK (under items) ----------------
-    story.append(Spacer(1, 0.12 * inch))
+    # ---------------- MORE SPACE BETWEEN ITEMS AND NOTE BAR ----------------
+    # "a few returns" -> larger spacer than before
+    story.append(Spacer(1, 0.30 * inch))
 
+    # ---------------- NOTE BAR + FINE PRINT BLOCK (under items) ----------------
     note_text = (
         "NOTE: Liability limitation for loss or damage in this shipment may be applicable. "
         "See 49 USC 14706(c)(1)(A) and (B)."
@@ -306,31 +313,6 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         )
     )
     story.append(sig_shipper)
-
-    story.append(Spacer(1, 0.12 * inch))
-
-    carrier_ack = (
-        "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies emergency response "
-        "information was made available and/or carrier has the Department of Transportaton emergency response guidebook or "
-        "equivalent documentation in vehicle. Property described above is received in good order, except as noted"
-    )
-    story.append(Paragraph(carrier_ack, styles["FinePrint"]))
-    story.append(Spacer(1, 0.06 * inch))
-
-    sig_consignee = Table(
-        [["Consignee Signature: _____________________________", "Date: ________________"]],
-        colWidths=[5.3 * inch, 1.9 * inch],
-    )
-    sig_consignee.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-                ("PADDING", (0, 0), (-1, -1), 6),
-                ("FONTSIZE", (0, 0), (-1, -1), 10),
-            ]
-        )
-    )
-    story.append(sig_consignee)
 
     story.append(Spacer(1, 0.10 * inch))
 
