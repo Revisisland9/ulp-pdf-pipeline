@@ -149,17 +149,24 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
             s(it.get("NmfcCode")),
         ])
 
-    itab = Table(rows, colWidths=[2.9, 0.9, 0.8, 1.0, 0.6, 1.1])
+    itab = Table(
+        rows,
+        colWidths=[2.9 * inch, 0.9 * inch, 0.8 * inch, 1.0 * inch, 0.6 * inch, 1.1 * inch],
+    )
+
     itab.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.black),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
+
     story.append(itab)
 
-    # Extra space before NOTE
     story.append(Spacer(1, 0.30 * inch))
 
     # ---------------- NOTE BAR ----------------
@@ -170,10 +177,12 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
             styles["NoteBar"]
         )
     ]], colWidths=[7.2 * inch])
+
     note_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.black),
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
+
     story.append(note_tbl)
 
     story.append(Spacer(1, 0.08 * inch))
@@ -186,10 +195,9 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         styles["FinePrint"]
     ))
 
-    # ----------- Controlled spacing before signatures -----------
     story.append(Spacer(1, 0.50 * inch))
 
-    # ---------------- SHIPPER CERTIFICATION ----------------
+    # ---------------- SHIPPER SIGNATURE ----------------
     story.append(Paragraph(
         "This is to certify that the above named materials are properly classified, described, packaged, marked and labeled, "
         "and are in proper condition for transportation according to the applicable regulations of the Department of Transportation.",
@@ -205,6 +213,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     story.append(Spacer(1, 0.25 * inch))
 
+    # ---------------- DRIVER SIGNATURE ----------------
     story.append(Paragraph(
         "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies emergency response "
         "information was made available and/or carrier has the Department of Transportation emergency response guidebook "
@@ -222,3 +231,4 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     doc.build(story)
     buf.seek(0)
     return buf.read()
+
