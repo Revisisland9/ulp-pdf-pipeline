@@ -173,49 +173,45 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     story.append(parties_table)
 
     # ---------------- REFERENCES + SERVICES (RIGHT HALF) ----------------
-refs_all = req.get("ReferenceNumbers") or []
-refs = [r for r in refs_all if not _exclude_reference_type_pdf_(s(r.get("Type")))]
+    refs_all = req.get("ReferenceNumbers") or []
+    refs = [r for r in refs_all if not _exclude_reference_type_pdf_(s(r.get("Type")))]
 
-right_stack: List[Any] = []
+    right_stack: List[Any] = []
 
-# References table (no header row)
-if refs:
-    ref_rows = []
-    for r in refs:
-        t = s(r.get("Type"))
-        v = s(r.get("ReferenceNumber"))
-        if not t and not v:
-            continue
-        ref_rows.append([
-            Paragraph(f"<b>{t}:</b>", styles["Small"]),
-            Paragraph(v or "—", styles["Small"]),
-        ])
+    if refs:
+        ref_rows = []
+        for r in refs:
+            t = s(r.get("Type"))
+            v = s(r.get("ReferenceNumber"))
+            if not t and not v:
+                continue
+            ref_rows.append([
+                Paragraph(f"<b>{t}:</b>", styles["Small"]),
+                Paragraph(v or "—", styles["Small"]),
+            ])
 
-    if ref_rows:
-        ref_table = Table(ref_rows, colWidths=[1.8 * inch, 1.8 * inch])
-        ref_table.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-            ("PADDING", (0, 0), (-1, -1), 6),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        right_stack.append(ref_table)
+        if ref_rows:
+            ref_table = Table(ref_rows, colWidths=[1.8 * inch, 1.8 * inch])
+            ref_table.setStyle(TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ("PADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            right_stack.append(ref_table)
 
-# Services line under the refs table
-right_stack.append(Spacer(1, 0.08 * inch))
-right_stack.append(Paragraph(f"<b>Services:</b> {_services_display(req)}", styles["BolHeader"]))
+    right_stack.append(Spacer(1, 0.08 * inch))
+    right_stack.append(Paragraph(f"<b>Services:</b> {_services_display(req)}", styles["BolHeader"]))
 
-# Place on right half (left side blank)
-story.append(Spacer(1, 0.12 * inch))
-right_half = Table(
-    [[Paragraph("", styles["Small"]), right_stack]],
-    colWidths=[3.6 * inch, 3.6 * inch],
-)
-right_half.setStyle(TableStyle([
-    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ("PADDING", (0, 0), (-1, -1), 0),
-]))
-story.append(right_half)
-
+    story.append(Spacer(1, 0.12 * inch))
+    right_half = Table(
+        [[Paragraph("", styles["Small"]), right_stack]],
+        colWidths=[3.6 * inch, 3.6 * inch],
+    )
+    right_half.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(right_half)
 
     # ---------------- ITEMS TABLE (NO 'Items' WORD) ----------------
     story.append(Spacer(1, 0.20 * inch))
