@@ -29,28 +29,17 @@ def _first_pickup_date(req: Dict[str, Any]) -> str:
 
 
 def _exclude_reference_type_pdf_(ref_type: str) -> bool:
-    """
-    PDF-only filter: exclude ONLY Job Name and Load Number from printing.
-    Everything else should print normally.
-    """
     t = (ref_type or "").strip().lower()
     return ("job name" in t) or ("load number" in t)
 
 
 def _services_display(req: Dict[str, Any]) -> str:
-    """
-    APPT is defaulted ON (always show Appointment Required)
-    Liftgate only if selected
-    """
     labels: List[str] = ["Appointment Required"]
-
     flags = get_path(req, "Constraints", "ServiceFlags", default=[]) or []
+
     for f in flags:
         code = s(f.get("ServiceCode")).upper()
-        selected = f.get("IsSelected") is True
-        if not selected:
-            continue
-        if code in {"LIFTGATE", "LIFT", "LG"}:
+        if f.get("IsSelected") is True and code in {"LIFTGATE", "LIFT", "LG"}:
             if "Liftgate" not in labels:
                 labels.append("Liftgate")
 
@@ -72,7 +61,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=9, leading=11))
     styles.add(ParagraphStyle(name="H2", parent=styles["Heading2"], spaceBefore=8, spaceAfter=6))
-    styles.add(ParagraphStyle(name="BolTitle", parent=styles["Title"], fontSize=20, leading=22, spaceAfter=2))
+    styles.add(ParagraphStyle(name="BolTitle", parent=styles["Title"], fontSize=20, leading=22))
     styles.add(ParagraphStyle(name="BolHeader", parent=styles["Normal"], fontSize=10, leading=12))
 
     styles.add(ParagraphStyle(
@@ -95,9 +84,9 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     # ---------------- TITLE ----------------
     story.append(Paragraph("BILL OF LADING", styles["BolTitle"]))
-    story.append(Spacer(1, 0.30 * inch))  # 3 returns
+    story.append(Spacer(1, 0.30 * inch))
 
-    # ---------------- PRIMARY / DATE / TERMS ----------------
+    # ---------------- HEADER ROW ----------------
     pref = _primary_ref(req)
     pickup_date = _first_pickup_date(req)
 
@@ -109,12 +98,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ]],
         colWidths=[2.8 * inch, 2.2 * inch, 2.2 * inch],
     )
-    header_tbl.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("PADDING", (0, 0), (-1, -1), 0),
-    ]))
     story.append(header_tbl)
-
     story.append(Spacer(1, 0.08 * inch))
     story.append(HRFlowable(width="100%", thickness=1.1, color=colors.black))
     story.append(Spacer(1, 0.12 * inch))
@@ -146,17 +130,17 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     parties_table = Table(
         [
-            [Paragraph("<b>Shipper</b>", styles["Normal"]),
-             Paragraph("<b>Consignee</b>", styles["Normal"]),
-             Paragraph("<b>Bill To</b>", styles["Normal"])],
-            [Paragraph(party_block(shipper, True), styles["Small"]),
-             Paragraph(party_block(consignee, True), styles["Small"]),
-             Paragraph(party_block(bill_to, False), styles["Small"])],
+            ["Shipper", "Consignee", "Bill To"],
+            [
+                Paragraph(party_block(shipper, True), styles["Small"]),
+                Paragraph(party_block(consignee, True), styles["Small"]),
+                Paragraph(party_block(bill_to, False), styles["Small"]),
+            ],
         ],
         colWidths=[2.4 * inch, 2.4 * inch, 2.4 * inch],
     )
     parties_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
         ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
         ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
@@ -164,138 +148,86 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(parties_table)
 
-    # ---------------- REFERENCES + SERVICES (RIGHT HALF) ----------------
-    refs_all = req.get("ReferenceNumbers") or []
-    refs = [r for r in refs_all if not _exclude_reference_type_pdf_(s(r.get("Type")))]
-
-    services = _services_display(req)
-
-    # Build a right-side stack: references table (if any) + services line
-    right_stack: List[Any] = []
-
-    if refs:
-        ref_rows = [["Type", "Reference Number"]]
-        for r in refs:
-            ref_rows.append([s(r.get("Type")), s(r.get("ReferenceNumber"))])
-
-        ref_table = Table(ref_rows, colWidths=[2.2 * inch, 1.4 * inch])
-        ref_table.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-            ("PADDING", (0, 0), (-1, -1), 6),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        right_stack.append(ref_table)
-
-    # Services line tucked under references
-    right_stack.append(Spacer(1, 0.06 * inch))
-    right_stack.append(Paragraph(f"<b>Services:</b> {services}", styles["BolHeader"]))
-
-    # Place right stack in right half of page under parties
-    story.append(Spacer(1, 0.12 * inch))
-    right_half = Table(
-        [[Paragraph("", styles["Small"]), right_stack]],
-        colWidths=[3.6 * inch, 3.6 * inch],
-    )
-    right_half.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("PADDING", (0, 0), (-1, -1), 0),
-    ]))
-    story.append(right_half)
-
     # ---------------- ITEMS ----------------
-    story.append(Spacer(1, 0.15 * inch))
+    story.append(Spacer(1, 0.20 * inch))
     story.append(Paragraph("Items", styles["H2"]))
 
-    items = req.get("Items") or []
-    if not items:
-        story.append(Paragraph("No items provided.", styles["Small"]))
-    else:
-        rows = [["Description", "Qty", "Wt (lb)", "Dims (in)", "Class", "NMFC"]]
-        for it in items:
-            rows.append([
-                s(it.get("Description")),
-                f"{s(get_path(it,'Quantities','Actual',default=''))} {s(get_path(it,'Quantities','Uom',default=''))}".strip(),
-                s(get_path(it, "Weights", "Actual", default="")),
-                f"{s(get_path(it,'Dimensions','Length',default=''))}x{s(get_path(it,'Dimensions','Width',default=''))}x{s(get_path(it,'Dimensions','Height',default=''))}",
-                s(get_path(it, "FreightClasses", "FreightClass", default="")),
-                s(it.get("NmfcCode")),
-            ])
+    rows = [["Description", "Qty", "Wt (lb)", "Dims (in)", "Class", "NMFC"]]
+    for it in (req.get("Items") or []):
+        rows.append([
+            s(it.get("Description")),
+            f"{s(get_path(it,'Quantities','Actual',default=''))} {s(get_path(it,'Quantities','Uom',default=''))}".strip(),
+            s(get_path(it, "Weights", "Actual", default="")),
+            f"{s(get_path(it,'Dimensions','Length',default=''))}x{s(get_path(it,'Dimensions','Width',default=''))}x{s(get_path(it,'Dimensions','Height',default=''))}",
+            s(get_path(it, "FreightClasses", "FreightClass", default="")),
+            s(it.get("NmfcCode")),
+        ])
 
-        itab = Table(
-            rows,
-            colWidths=[2.9 * inch, 0.9 * inch, 0.8 * inch, 1.0 * inch, 0.6 * inch, 1.1 * inch],
-        )
-        itab.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.black),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-            ("PADDING", (0, 0), (-1, -1), 6),
-        ]))
-        story.append(itab)
-
-    story.append(Spacer(1, 0.30 * inch))
-
-    # ---------------- NOTE BAR + NOTICE ----------------
-    note_tbl = Table([[
-        Paragraph(
-            "NOTE: Liability limitation for loss or damage in this shipment may be applicable. "
-            "See 49 USC 14706(c)(1)(A) and (B).",
-            styles["NoteBar"],
-        )
-    ]], colWidths=[7.2 * inch])
-    note_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.black),
+    itab = Table(rows,
+                 colWidths=[2.9 * inch, 0.9 * inch, 0.8 * inch,
+                            1.0 * inch, 0.6 * inch, 1.1 * inch])
+    itab.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.black),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
-    story.append(note_tbl)
+    story.append(itab)
 
-    story.append(Spacer(1, 0.08 * inch))
+    story.append(Spacer(1, 0.40 * inch))
 
-    story.append(Paragraph(
-        "Received, subject to the agreement between the Carrier and listed Third Party. In effect on the date of shipment "
-        "Carrier agrees that listed Third Party is the sole payer of the corresponding freight bill. "
-        "This Bill of Lading is not subject to any tariffs or classifications, whether individually determined of filed with any federal "
-        "or state regulatory agency, except as specifically agreed to in writing by the listed Third Party and Carrier.",
-        styles["FinePrint"]
-    ))
+    # ---------------- SHIPPER BOX ----------------
+    shipper_box = Table(
+        [[
+            Paragraph(
+                "This is to certify that the above named materials are properly classified, described, "
+                "packaged, marked and labeled, and are in proper condition for transportation according "
+                "to the applicable regulations of the Department of Transportation.",
+                styles["FinePrint"],
+            )
+        ],
+         [Spacer(1, 0.15 * inch)],
+         [Table(
+             [["Shipper Signature: ________________________________", "Date: ________________"]],
+             colWidths=[5.3 * inch, 1.9 * inch],
+         )]],
+        colWidths=[7.2 * inch],
+    )
 
-    # A few returns before signatures
-    story.append(Spacer(1, 0.50 * inch))
+    shipper_box.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1, colors.black),
+        ("PADDING", (0, 0), (-1, -1), 8),
+    ]))
 
-    # ---------------- SIGNATURES ----------------
-    story.append(Paragraph(
-        "This is to certify that the above named materials are properly classified, described, packaged, marked and labeled, "
-        "and are in proper condition for transportation according to the applicable regulations of the Department of Transportation.",
-        styles["FinePrint"]
-    ))
-    story.append(Spacer(1, 0.10 * inch))
-
-    story.append(Table(
-        [["Shipper Signature: ________________________________", "Date: ________________"]],
-        colWidths=[5.3 * inch, 1.9 * inch],
-    ))
-
+    story.append(shipper_box)
     story.append(Spacer(1, 0.25 * inch))
 
-    story.append(Paragraph(
-        "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies emergency response "
-        "information was made available and/or carrier has the Department of Transportation emergency response guidebook "
-        "or equivalent documentation in vehicle. Property described above is received in good order, except as noted.",
-        styles["FinePrint"]
-    ))
-    story.append(Spacer(1, 0.10 * inch))
+    # ---------------- DRIVER BOX ----------------
+    driver_box = Table(
+        [[
+            Paragraph(
+                "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies "
+                "emergency response information was made available and/or carrier has the Department of "
+                "Transportation emergency response guidebook or equivalent documentation in vehicle. "
+                "Property described above is received in good order, except as noted.",
+                styles["FinePrint"],
+            )
+        ],
+         [Spacer(1, 0.15 * inch)],
+         [Table(
+             [["Driver Signature: ________________________________", "Date: ________________"]],
+             colWidths=[5.3 * inch, 1.9 * inch],
+         )]],
+        colWidths=[7.2 * inch],
+    )
 
-    story.append(Table(
-        [["Driver Signature:  ________________________________", "Date: ________________"]],
-        colWidths=[5.3 * inch, 1.9 * inch],
-    ))
+    driver_box.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1, colors.black),
+        ("PADDING", (0, 0), (-1, -1), 8),
+    ]))
+
+    story.append(driver_box)
 
     doc.build(story)
     buf.seek(0)
