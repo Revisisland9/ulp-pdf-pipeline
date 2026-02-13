@@ -46,21 +46,34 @@ def _exclude_reference_type_pdf_(ref_type: str) -> bool:
 
 def _services_display(req: Dict[str, Any]) -> str:
     """
-    APPT always shown.
-    Liftgate shown if any of LIFTGATE/LIFT/LG/LG1 is selected.
-    """
-    services: List[str] = ["Appointment Required"]  # APPT defaulted on
+    Always show 'Appointment Required' on all BOLs.
+    If LG1 is present + selected anywhere we look, add 'Liftgate Required'.
 
-    flags = get_path(req, "Constraints", "ServiceFlags", default=[]) or []
+    Supports ServiceFlags at:
+      - req["ServiceFlags"]   (your current JSON)
+      - req["Constraints"]["ServiceFlags"] (older shape)
+    """
+    services: List[str] = ["Appointment Required"]  # always
+
+    flags = (
+        (req.get("ServiceFlags") or [])
+        or (get_path(req, "Constraints", "ServiceFlags", default=[]) or [])
+    )
+
+    liftgate_on = False
     for f in flags:
         if f.get("IsSelected") is not True:
             continue
         code = s(f.get("ServiceCode")).upper()
-        if code in {"LIFTGATE", "LIFT", "LG", "LG1"}:
-            if "Liftgate" not in services:
-                services.append("Liftgate")
+        if code == "LG1":
+            liftgate_on = True
+            break
+
+    if liftgate_on:
+        services.append("Liftgate Required")
 
     return ", ".join(services)
+
 
 
 # ---------------- PDF Builder ----------------
