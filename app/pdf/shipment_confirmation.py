@@ -34,8 +34,31 @@ def _exclude_reference_type_pdf_(ref_type: str) -> bool:
     Everything else should print normally.
     """
     t = (ref_type or "").strip().lower()
-    # Only exclude these exact concepts (substring match to catch minor variations)
-    return ("job name" in t) or ("load number" in t) or (t == "job name") or (t == "load number")
+    return ("job name" in t) or ("load number" in t)
+
+
+def _services_display(req: Dict[str, Any]) -> str:
+    """
+    Show services on the BOL.
+    - APPT is defaulted ON (always show as 'Appointment Required')
+    - If Liftgate is selected anywhere in Constraints.ServiceFlags, show 'Liftgate'
+    """
+    labels: List[str] = ["Appointment Required"]  # always show
+
+    flags = get_path(req, "Constraints", "ServiceFlags", default=[]) or []
+    # Each flag could look like {"ServiceCode":"LIFTGATE","IsSelected":true} etc.
+    for f in flags:
+        code = s(f.get("ServiceCode")).upper()
+        selected = f.get("IsSelected") is True
+
+        if not selected:
+            continue
+
+        if code in {"LIFTGATE", "LIFT", "LG"}:
+            if "Liftgate" not in labels:
+                labels.append("Liftgate")
+
+    return ", ".join(labels)
 
 
 def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
@@ -97,6 +120,11 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ("PADDING", (0, 0), (-1, -1), 0),
     ]))
     story.append(header_tbl)
+
+    # ---------------- SERVICES LINE (NEW) ----------------
+    services = _services_display(req)
+    story.append(Spacer(1, 0.08 * inch))
+    story.append(Paragraph(f"<b>Services:</b> {services}", styles["BolHeader"]))
 
     story.append(Spacer(1, 0.08 * inch))
     story.append(HRFlowable(width="100%", thickness=1.1, color=colors.black))
@@ -168,7 +196,6 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
             ("FONTSIZE", (0, 0), (-1, -1), 9),
         ]))
 
-        # Right-half placement (blank left)
         right_half = Table([[Paragraph("", styles["Small"]), ref_table]], colWidths=[3.6 * inch, 3.6 * inch])
         right_half.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -211,7 +238,6 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ]))
         story.append(itab)
 
-    # More space before NOTE bar
     story.append(Spacer(1, 0.30 * inch))
 
     # ---------------- NOTE BAR + NOTICE ----------------
@@ -238,7 +264,6 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         styles["FinePrint"]
     ))
 
-    # Spacing before signatures (a few returns)
     story.append(Spacer(1, 0.50 * inch))
 
     # ---------------- SIGNATURES ----------------
