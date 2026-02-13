@@ -17,6 +17,8 @@ from reportlab.platypus import (
 from app.util.helpers import s, get_path, fmt_phone
 
 
+# ---------------- Reference Helpers ----------------
+
 def _primary_ref(req: Dict[str, Any]) -> str:
     for r in (req.get("ReferenceNumbers") or []):
         if r.get("IsPrimary"):
@@ -28,23 +30,35 @@ def _first_pickup_date(req: Dict[str, Any]) -> str:
     return s(get_path(req, "Dates", "EarliestPickupDate", default=""))
 
 
-def _exclude_reference_type_pdf_(ref_type: str) -> bool:
-    t = (ref_type or "").strip().lower()
-    return ("job name" in t) or ("load number" in t)
+def _get_reference_by_type(req: Dict[str, Any], type_name: str) -> str:
+    for r in (req.get("ReferenceNumbers") or []):
+        if s(r.get("Type")).lower() == type_name.lower():
+            return s(r.get("ReferenceNumber"))
+    return ""
 
+
+# ---------------- Services ----------------
 
 def _services_display(req: Dict[str, Any]) -> str:
+    """
+    APPT always shown.
+    Liftgate shown if LIFTGATE / LG / LG1 present and selected.
+    """
     labels: List[str] = ["Appointment Required"]
+
     flags = get_path(req, "Constraints", "ServiceFlags", default=[]) or []
 
     for f in flags:
         code = s(f.get("ServiceCode")).upper()
-        if f.get("IsSelected") is True and code in {"LIFTGATE", "LIFT", "LG"}:
-            if "Liftgate" not in labels:
-                labels.append("Liftgate")
+        if f.get("IsSelected") is True:
+            if code in {"LIFTGATE", "LIFT", "LG", "LG1"}:
+                if "Liftgate" not in labels:
+                    labels.append("Liftgate")
 
     return ", ".join(labels)
 
+
+# ---------------- PDF Builder ----------------
 
 def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     buf = BytesIO()
@@ -63,14 +77,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     styles.add(ParagraphStyle(name="H2", parent=styles["Heading2"], spaceBefore=8, spaceAfter=6))
     styles.add(ParagraphStyle(name="BolTitle", parent=styles["Title"], fontSize=20, leading=22))
     styles.add(ParagraphStyle(name="BolHeader", parent=styles["Normal"], fontSize=10, leading=12))
-
-    styles.add(ParagraphStyle(
-        name="FinePrint",
-        parent=styles["Normal"],
-        fontSize=7.5,
-        leading=9,
-    ))
-
+    styles.add(ParagraphStyle(name="FinePrint", parent=styles["Normal"], fontSize=7.5, leading=9))
     styles.add(ParagraphStyle(
         name="NoteBar",
         parent=styles["Normal"],
@@ -99,6 +106,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         colWidths=[2.8 * inch, 2.2 * inch, 2.2 * inch],
     )
     story.append(header_tbl)
+
     story.append(Spacer(1, 0.08 * inch))
     story.append(HRFlowable(width="100%", thickness=1.1, color=colors.black))
     story.append(Spacer(1, 0.12 * inch))
@@ -139,6 +147,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ],
         colWidths=[2.4 * inch, 2.4 * inch, 2.4 * inch],
     )
+
     parties_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
@@ -146,13 +155,45 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
         ("PADDING", (0, 0), (-1, -1), 8),
     ]))
+
     story.append(parties_table)
+
+    # ---------------- REFERENCES (Sales Order + PO Only) ----------------
+    story.append(Spacer(1, 0.12 * inch))
+
+    sales_order = _get_reference_by_type(req, "Shipment Number")
+    po_number = _get_reference_by_type(req, "PO Number")
+
+    ref_text = ""
+    if sales_order:
+        ref_text += f"<b>Sales Order:</b> {sales_order}<br/>"
+    if po_number:
+        ref_text += f"<b>PO Number:</b> {po_number}"
+
+    right_block = Table(
+        [[Paragraph("", styles["Small"]),
+          Paragraph(ref_text, styles["BolHeader"])]],
+        colWidths=[3.6 * inch, 3.6 * inch],
+    )
+    story.append(right_block)
+
+    # ---------------- SERVICES (Under References) ----------------
+    story.append(Spacer(1, 0.06 * inch))
+    services = _services_display(req)
+
+    services_row = Table(
+        [[Paragraph("", styles["Small"]),
+          Paragraph(f"<b>Services:</b> {services}", styles["BolHeader"])]],
+        colWidths=[3.6 * inch, 3.6 * inch],
+    )
+    story.append(services_row)
 
     # ---------------- ITEMS ----------------
     story.append(Spacer(1, 0.20 * inch))
     story.append(Paragraph("Items", styles["H2"]))
 
     rows = [["Description", "Qty", "Wt (lb)", "Dims (in)", "Class", "NMFC"]]
+
     for it in (req.get("Items") or []):
         rows.append([
             s(it.get("Description")),
@@ -166,6 +207,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     itab = Table(rows,
                  colWidths=[2.9 * inch, 0.9 * inch, 0.8 * inch,
                             1.0 * inch, 0.6 * inch, 1.1 * inch])
+
     itab.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.black),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -173,25 +215,21 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
+
     story.append(itab)
 
+    # ---------------- SIGNATURE BOXES ----------------
     story.append(Spacer(1, 0.40 * inch))
 
-    # ---------------- SHIPPER BOX ----------------
     shipper_box = Table(
-        [[
-            Paragraph(
-                "This is to certify that the above named materials are properly classified, described, "
-                "packaged, marked and labeled, and are in proper condition for transportation according "
-                "to the applicable regulations of the Department of Transportation.",
-                styles["FinePrint"],
-            )
-        ],
+        [[Paragraph(
+            "This is to certify that the above named materials are properly classified, described, "
+            "packaged, marked and labeled, and are in proper condition for transportation according "
+            "to the applicable regulations of the Department of Transportation.",
+            styles["FinePrint"])],
          [Spacer(1, 0.15 * inch)],
-         [Table(
-             [["Shipper Signature: ________________________________", "Date: ________________"]],
-             colWidths=[5.3 * inch, 1.9 * inch],
-         )]],
+         [Table([["Shipper Signature: ________________________________", "Date: ________________"]],
+                colWidths=[5.3 * inch, 1.9 * inch])]],
         colWidths=[7.2 * inch],
     )
 
@@ -203,22 +241,16 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     story.append(shipper_box)
     story.append(Spacer(1, 0.25 * inch))
 
-    # ---------------- DRIVER BOX ----------------
     driver_box = Table(
-        [[
-            Paragraph(
-                "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies "
-                "emergency response information was made available and/or carrier has the Department of "
-                "Transportation emergency response guidebook or equivalent documentation in vehicle. "
-                "Property described above is received in good order, except as noted.",
-                styles["FinePrint"],
-            )
-        ],
+        [[Paragraph(
+            "Carrier acknowledges receipt of packages and required four (4) placards. Carrier certifies "
+            "emergency response information was made available and/or carrier has the Department of "
+            "Transportation emergency response guidebook or equivalent documentation in vehicle. "
+            "Property described above is received in good order, except as noted.",
+            styles["FinePrint"])],
          [Spacer(1, 0.15 * inch)],
-         [Table(
-             [["Driver Signature: ________________________________", "Date: ________________"]],
-             colWidths=[5.3 * inch, 1.9 * inch],
-         )]],
+         [Table([["Driver Signature: ________________________________", "Date: ________________"]],
+                colWidths=[5.3 * inch, 1.9 * inch])]],
         colWidths=[7.2 * inch],
     )
 
