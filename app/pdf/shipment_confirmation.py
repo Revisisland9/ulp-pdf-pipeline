@@ -1,6 +1,7 @@
 from io import BytesIO
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from reportlab.graphics.barcode import code128
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -35,13 +36,33 @@ def _date_only(dt: str) -> str:
     return dt.split()[0] if dt else ""
 
 
-def _exclude_reference_type_pdf_(ref_type: str) -> bool:
+def _normalize_ref_type_for_pdf_(ref_type: str) -> str:
     """
-    PDF-only filter: exclude ONLY Job Name and Load Number from printing.
-    Everything else prints.
+    PDF display label changes:
+      - "Load Number" -> "PLT LOC."
+      - "Job Name"    -> "QTY"
+    Everything else prints as-is.
     """
-    t = (ref_type or "").strip().lower()
-    return ("job name" in t) or ("load number" in t)
+    t = (ref_type or "").strip()
+    tl = t.lower()
+
+    if "load number" in tl:
+        return "PLT LOC."
+    if "job name" in tl:
+        return "QTY"
+    return t
+
+
+def _find_ref_value_(req: Dict[str, Any], type_names: List[str]) -> str:
+    """
+    Find a ReferenceNumber by matching Type (case-insensitive) against any provided names.
+    """
+    want = {s(n).strip().lower() for n in (type_names or []) if s(n).strip()}
+    for r in (req.get("ReferenceNumbers") or []):
+        t = s(r.get("Type")).strip().lower()
+        if t in want:
+            return s(r.get("ReferenceNumber"))
+    return ""
 
 
 def _services_display(req: Dict[str, Any]) -> str:
@@ -74,6 +95,39 @@ def _services_display(req: Dict[str, Any]) -> str:
 
     return ", ".join(services)
 
+
+def _build_pro_barcode_block_(req: Dict[str, Any], styles) -> Optional[Any]:
+    """
+    Build a barcode flowable for PRO Number (Code128) suitable for the left empty space
+    next to the references table.
+
+    Returns a small Table containing label + barcode, or None if no PRO found.
+    """
+    pro = _find_ref_value_(req, ["pro number", "pro", "pro#"])
+    if not pro:
+        return None
+
+    # Barcode value should not include spaces
+    pro_code = (pro or "").replace(" ", "").strip()
+    if not pro_code:
+        return None
+
+    bc = code128.Code128(pro_code, barHeight=0.55 * inch, barWidth=1.2)
+
+    # Label above barcode, PRO text below for readability
+    blk = Table(
+        [
+            [Paragraph("<b>PRO BARCODE</b>", styles["BolHeader"])],
+            [bc],
+            [Paragraph(pro, styles["Small"])],
+        ],
+        colWidths=[3.4 * inch],
+    )
+    blk.setStyle(TableStyle([
+        ("PADDING", (0, 0), (-1, -1), 0),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return blk
 
 
 # ---------------- PDF Builder ----------------
@@ -185,19 +239,26 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(parties_table)
 
-    # ---------------- REFERENCES + SERVICES (RIGHT HALF) ----------------
+    # ---------------- PRO BARCODE (LEFT) + REFERENCES + SERVICES (RIGHT) ----------------
     refs_all = req.get("ReferenceNumbers") or []
-    refs = [r for r in refs_all if not _exclude_reference_type_pdf_(s(r.get("Type")))]
+    refs = refs_all[:]  # ✅ allow all references, including Load Number + Job Name
 
+    # Left: PRO barcode block (if present). Otherwise blank.
+    left_block = _build_pro_barcode_block_(req, styles) or Paragraph("", styles["Small"])
+
+    # Right: references table + services
     right_stack: List[Any] = []
 
     if refs:
         ref_rows = []
         for r in refs:
-            t = s(r.get("Type"))
+            t_raw = s(r.get("Type"))
             v = s(r.get("ReferenceNumber"))
-            if not t and not v:
+            if not t_raw and not v:
                 continue
+
+            t = _normalize_ref_type_for_pdf_(t_raw)
+
             ref_rows.append([
                 Paragraph(f"<b>{t}:</b>", styles["Small"]),
                 Paragraph(v or "—", styles["Small"]),
@@ -216,15 +277,17 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     right_stack.append(Paragraph(f"<b>Services:</b> {_services_display(req)}", styles["BolHeader"]))
 
     story.append(Spacer(1, 0.12 * inch))
-    right_half = Table(
-        [[Paragraph("", styles["Small"]), right_stack]],
+
+    # Put barcode in the empty left space next to references
+    two_col = Table(
+        [[left_block, right_stack]],
         colWidths=[3.6 * inch, 3.6 * inch],
     )
-    right_half.setStyle(TableStyle([
+    two_col.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("PADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.append(right_half)
+    story.append(two_col)
 
     # ---------------- ITEMS TABLE (NO 'Items' WORD) ----------------
     story.append(Spacer(1, 0.20 * inch))
@@ -234,9 +297,9 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     for it in items:
         rows.append([
             s(it.get("Description")),
-            f"{s(get_path(it,'Quantities','Actual',default=''))} {s(get_path(it,'Quantities','Uom',default=''))}".strip(),
+            f"{s(get_path(it, 'Quantities', 'Actual', default=''))} {s(get_path(it, 'Quantities', 'Uom', default=''))}".strip(),
             s(get_path(it, "Weights", "Actual", default="")),
-            f"{s(get_path(it,'Dimensions','Length',default=''))}x{s(get_path(it,'Dimensions','Width',default=''))}x{s(get_path(it,'Dimensions','Height',default=''))}",
+            f"{s(get_path(it, 'Dimensions', 'Length', default=''))}x{s(get_path(it, 'Dimensions', 'Width', default=''))}x{s(get_path(it, 'Dimensions', 'Height', default=''))}",
             s(get_path(it, "FreightClasses", "FreightClass", default="")),
             s(it.get("NmfcCode")),
         ])
