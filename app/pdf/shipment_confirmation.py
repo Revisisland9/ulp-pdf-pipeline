@@ -36,23 +36,6 @@ def _date_only(dt: str) -> str:
     return dt.split()[0] if dt else ""
 
 
-def _normalize_ref_type_for_pdf_(ref_type: str) -> str:
-    """
-    PDF display label changes:
-      - "Load Number" -> "PLT LOC."
-      - "Job Name"    -> "QTY"
-    Everything else prints as-is.
-    """
-    t = (ref_type or "").strip()
-    tl = t.lower()
-
-    if "load number" in tl:
-        return "PLT LOC."
-    if "job name" in tl:
-        return "QTY"
-    return t
-
-
 def _find_ref_value_(req: Dict[str, Any], type_names: List[str]) -> str:
     """
     Find a ReferenceNumber by matching Type (case-insensitive) against any provided names.
@@ -98,10 +81,12 @@ def _services_display(req: Dict[str, Any]) -> str:
 
 def _build_pro_barcode_block_(req: Dict[str, Any], styles) -> Optional[Any]:
     """
-    Build a barcode flowable for PRO Number (Code128) suitable for the left empty space
+    Build a barcode flowable for PRO Number (Code128) that sits in the left empty space
     next to the references table.
 
-    Returns a small Table containing label + barcode, or None if no PRO found.
+    Changes requested:
+      - No "PRO BARCODE" label
+      - Center the PRO number text under the barcode
     """
     pro = _find_ref_value_(req, ["pro number", "pro", "pro#"])
     if not pro:
@@ -112,22 +97,27 @@ def _build_pro_barcode_block_(req: Dict[str, Any], styles) -> Optional[Any]:
     if not pro_code:
         return None
 
-    bc = code128.Code128(pro_code, barHeight=0.55 * inch, barWidth=1.2)
+    # Use a thinner barWidth so it fits reliably in the left column
+    bc = code128.Code128(pro_code, barHeight=0.55 * inch, barWidth=0.6)
 
-    # Label above barcode, PRO text below for readability
     blk = Table(
         [
-            [Paragraph("<b>PRO BARCODE</b>", styles["BolHeader"])],
             [bc],
-            [Paragraph(pro, styles["Small"])],
+            [Paragraph(pro, styles["SmallCenter"])],
         ],
         colWidths=[3.4 * inch],
     )
     blk.setStyle(TableStyle([
         ("PADDING", (0, 0), (-1, -1), 0),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
     return blk
+
+
+def _is_job_or_load_(ref_type: str) -> bool:
+    t = (ref_type or "").strip().lower()
+    return ("job name" in t) or ("load number" in t)
 
 
 # ---------------- PDF Builder ----------------
@@ -146,6 +136,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=9, leading=11))
+    styles.add(ParagraphStyle(name="SmallCenter", parent=styles["Normal"], fontSize=9, leading=11, alignment=1))
     styles.add(ParagraphStyle(name="BolTitle", parent=styles["Title"], fontSize=20, leading=22))
     styles.add(ParagraphStyle(name="BolHeader", parent=styles["Normal"], fontSize=10, leading=12))
     styles.add(ParagraphStyle(name="FinePrint", parent=styles["Normal"], fontSize=7.5, leading=9))
@@ -239,28 +230,28 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(parties_table)
 
+    # Grab Job/Load values for later (under the items table)
+    qty_val = _find_ref_value_(req, ["job name"])           # prints as QTY
+    plt_loc_val = _find_ref_value_(req, ["load number"])    # prints as PLT LOC.
+
     # ---------------- PRO BARCODE (LEFT) + REFERENCES + SERVICES (RIGHT) ----------------
     refs_all = req.get("ReferenceNumbers") or []
-    refs = refs_all[:]  # ✅ allow all references, including Load Number + Job Name
+    # Remove Job Name + Load Number from the references table (they will be shown under items)
+    refs = [r for r in refs_all if not _is_job_or_load_(s(r.get("Type")))]
 
-    # Left: PRO barcode block (if present). Otherwise blank.
     left_block = _build_pro_barcode_block_(req, styles) or Paragraph("", styles["Small"])
 
-    # Right: references table + services
     right_stack: List[Any] = []
 
     if refs:
         ref_rows = []
         for r in refs:
-            t_raw = s(r.get("Type"))
+            t_raw = s(r.get("Type")).strip()
             v = s(r.get("ReferenceNumber"))
             if not t_raw and not v:
                 continue
-
-            t = _normalize_ref_type_for_pdf_(t_raw)
-
             ref_rows.append([
-                Paragraph(f"<b>{t}:</b>", styles["Small"]),
+                Paragraph(f"<b>{t_raw}:</b>", styles["Small"]),
                 Paragraph(v or "—", styles["Small"]),
             ])
 
@@ -278,7 +269,6 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     story.append(Spacer(1, 0.12 * inch))
 
-    # Put barcode in the empty left space next to references
     two_col = Table(
         [[left_block, right_stack]],
         colWidths=[3.6 * inch, 3.6 * inch],
@@ -319,6 +309,26 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
     story.append(itab)
+
+    # ---------------- QTY + PLT LOC ROW (UNDER ITEMS BAR) ----------------
+    # Requested: side-by-side, 1 row across, under the item bar/table.
+    # Show blanks as em dash for readability.
+    story.append(Spacer(1, 0.10 * inch))
+    qty_disp = qty_val or "—"
+    plt_disp = plt_loc_val or "—"
+
+    qty_pltl_tbl = Table(
+        [[
+            Paragraph(f"<b>QTY:</b> {qty_disp}", styles["BolHeader"]),
+            Paragraph(f"<b>PLT LOC.:</b> {plt_disp}", styles["BolHeader"]),
+        ]],
+        colWidths=[3.6 * inch, 3.6 * inch],
+    )
+    qty_pltl_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(qty_pltl_tbl)
 
     # ---------------- NOTE BAR + LEGAL TEXT ----------------
     story.append(Spacer(1, 0.30 * inch))
