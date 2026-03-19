@@ -116,8 +116,21 @@ def _build_pro_barcode_block_(req: Dict[str, Any], styles) -> Optional[Any]:
 
 
 def _is_job_or_load_(ref_type: str) -> bool:
+    """
+    Hide these refs from the main references table because they render
+    separately under the items table.
+
+    Supports both old and new names:
+      - old: Job Name / Load Number
+      - new: Quantity / Location
+    """
     t = (ref_type or "").strip().lower()
-    return ("job name" in t) or ("load number" in t)
+    return (
+        ("job name" in t)
+        or ("load number" in t)
+        or ("quantity" in t)
+        or ("location" in t)
+    )
 
 
 # ---------------- PDF Builder ----------------
@@ -230,13 +243,15 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(parties_table)
 
-    # Grab Job/Load values for later (under the items table)
-    qty_val = _find_ref_value_(req, ["job name"])           # prints as QTY
-    plt_loc_val = _find_ref_value_(req, ["load number"])    # prints as PLT LOC.
+    # Grab Quantity/Location values for later (under the items table)
+    # Supports both new and old reference names during transition.
+    qty_val = _find_ref_value_(req, ["quantity", "job name"])         # prints as QTY
+    plt_loc_val = _find_ref_value_(req, ["location", "load number"])  # prints as PLT LOC.
 
     # ---------------- PRO BARCODE (LEFT) + REFERENCES + SERVICES (RIGHT) ----------------
     refs_all = req.get("ReferenceNumbers") or []
-    # Remove Job Name + Load Number from the references table (they will be shown under items)
+    # Remove Quantity/Location (and old Job Name/Load Number) from the references table;
+    # they will be shown under items.
     refs = [r for r in refs_all if not _is_job_or_load_(s(r.get("Type")))]
 
     left_block = _build_pro_barcode_block_(req, styles) or Paragraph("", styles["Small"])
