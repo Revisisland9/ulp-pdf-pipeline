@@ -133,6 +133,55 @@ def _is_job_or_load_(ref_type: str) -> bool:
     )
 
 
+def _sum_item_weights_(req: Dict[str, Any]) -> float:
+    """
+    Fallback total weight calculation from Items.
+    Supports your current item shape:
+      - Weights.Actual
+      - Quantities.Actual (defaults to 1)
+    """
+    total = 0.0
+    for it in (req.get("Items") or []):
+        wt = get_path(it, "Weights", "Actual", default=0)
+        qty = get_path(it, "Quantities", "Actual", default=1)
+
+        try:
+            wt_num = float(wt or 0)
+        except Exception:
+            wt_num = 0.0
+
+        try:
+            qty_num = float(qty or 1)
+        except Exception:
+            qty_num = 1.0
+
+        total += wt_num * qty_num
+
+    return total
+
+
+def _total_weight_display_(req: Dict[str, Any]) -> str:
+    """
+    Prefer Meta.TotalWeight from Apps Script.
+    Fall back to summing Items if not present.
+    """
+    meta_total = get_path(req, "Meta", "TotalWeight", default=None)
+
+    if meta_total not in (None, "", "null"):
+        try:
+            val = float(meta_total)
+            if val.is_integer():
+                return f"{int(val):,} lb"
+            return f"{val:,.2f} lb"
+        except Exception:
+            pass
+
+    fallback = _sum_item_weights_(req)
+    if fallback.is_integer():
+        return f"{int(fallback):,} lb"
+    return f"{fallback:,.2f} lb"
+
+
 # ---------------- PDF Builder ----------------
 
 def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
@@ -250,8 +299,6 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
 
     # ---------------- PRO BARCODE (LEFT) + REFERENCES + SERVICES (RIGHT) ----------------
     refs_all = req.get("ReferenceNumbers") or []
-    # Remove Quantity/Location (and old Job Name/Load Number) from the references table;
-    # they will be shown under items.
     refs = [r for r in refs_all if not _is_job_or_load_(s(r.get("Type")))]
 
     left_block = _build_pro_barcode_block_(req, styles) or Paragraph("", styles["Small"])
@@ -325,9 +372,7 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
     ]))
     story.append(itab)
 
-    # ---------------- QTY + PLT LOC ROW (UNDER ITEMS BAR) ----------------
-    # Requested: side-by-side, 1 row across, under the item bar/table.
-    # Show blanks as em dash for readability.
+    # ---------------- QTY + PLT LOC ROW ----------------
     story.append(Spacer(1, 0.10 * inch))
     qty_disp = qty_val or "—"
     plt_disp = plt_loc_val or "—"
@@ -344,6 +389,21 @@ def build_shipment_confirmation_pdf(req: Dict[str, Any]) -> bytes:
         ("PADDING", (0, 0), (-1, -1), 0),
     ]))
     story.append(qty_pltl_tbl)
+
+    # ---------------- TOTAL WEIGHT ROW ----------------
+    story.append(Spacer(1, 0.06 * inch))
+    total_weight_tbl = Table(
+        [[
+            Paragraph(f"<b>Total Weight:</b> {_total_weight_display_(req)}", styles["BolHeader"]),
+            Paragraph("", styles["BolHeader"]),
+        ]],
+        colWidths=[3.6 * inch, 3.6 * inch],
+    )
+    total_weight_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(total_weight_tbl)
 
     # ---------------- NOTE BAR + LEGAL TEXT ----------------
     story.append(Spacer(1, 0.30 * inch))
