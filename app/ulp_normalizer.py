@@ -2,7 +2,6 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 
-# Shipment-level fields.
 SHIPMENT_FIELDS = {
     "customer_PO",
     "SRP_number",
@@ -16,18 +15,6 @@ SHIPMENT_FIELDS = {
 }
 
 
-# Handling-unit fields.
-HANDLING_UNIT_FIELDS = {
-    "length",
-    "width",
-    "height",
-    "weight",
-    "location",
-}
-
-
-# Based on ULP's normal freight / skid dimensions,
-# these values are very commonly the LENGTH.
 PREFERRED_LENGTHS = {
     48,
     72,
@@ -44,10 +31,6 @@ def _best_entity(
     entities: List[Dict[str, Any]],
     field_type: str,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Return the highest-confidence occurrence of a field.
-    """
-
     matches = [
         e
         for e in entities
@@ -67,10 +50,6 @@ def _best_entity(
 def _field_result(
     entity: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """
-    Convert an entity into the normalized output format.
-    """
-
     if not entity:
         return None
 
@@ -81,27 +60,7 @@ def _field_result(
     }
 
 
-def _entities_by_type(
-    entities: List[Dict[str, Any]],
-    field_type: str,
-) -> List[Dict[str, Any]]:
-    """
-    Return all occurrences of a field in document order.
-    """
-
-    return [
-        e
-        for e in entities
-        if e.get("type") == field_type
-        and e.get("value") not in (None, "")
-    ]
-
-
 def _numeric_value(value: Any):
-    """
-    Convert numeric-looking values to int/float.
-    """
-
     if value is None:
         return None
 
@@ -116,7 +75,51 @@ def _numeric_value(value: Any):
         return number
 
     except (TypeError, ValueError):
-        return value
+        return None
+
+
+def _numeric_entities_by_type(
+    entities: List[Dict[str, Any]],
+    field_type: str,
+) -> List[Dict[str, Any]]:
+    """
+    Return only numeric dimension/weight entities.
+
+    This deliberately rejects false OCR classifications like:
+        length = "L"
+    """
+
+    results = []
+
+    for entity in entities:
+        if entity.get("type") != field_type:
+            continue
+
+        numeric = _numeric_value(
+            entity.get("value")
+        )
+
+        if numeric is None:
+            continue
+
+        copied = dict(entity)
+        copied["numeric_value"] = numeric
+
+        results.append(copied)
+
+    return results
+
+
+def _entities_by_type(
+    entities: List[Dict[str, Any]],
+    field_type: str,
+) -> List[Dict[str, Any]]:
+    return [
+        e
+        for e in entities
+        if e.get("type") == field_type
+        and e.get("value") not in (None, "")
+    ]
 
 
 def _normalize_dimensions(
@@ -125,111 +128,230 @@ def _normalize_dimensions(
     height,
 ):
     """
-    Apply ULP-specific business rules to L/W/H.
+    Apply ULP-specific dimension rules.
 
-    Document AI usually reads the dimensions correctly, but it
-    occasionally swaps length and height.
-
-    Business rule:
-    Length is very commonly one of:
-
-        48, 72, 74, 79, 96, 98, 120, 144
-
-    If exactly one of the three dimensions matches a preferred
-    length value, use that dimension as length.
-
-    Width is generally left as-is unless reordering is required.
+    Returns:
+        normalized_length
+        normalized_width
+        normalized_height
+        dimensions_adjusted
     """
 
-    values = [length, width, height]
-
-    # Only work with numeric values.
-    numeric_values = [
-        v
-        for v in values
-        if isinstance(v, (int, float))
-    ]
-
-    if len(numeric_values) != 3:
+    if not all(
+        isinstance(v, (int, float))
+        for v in [length, width, height]
+    ):
         return length, width, height, False
 
+    values = [
+        length,
+        width,
+        height,
+    ]
+
+    #
+    # Special case:
+    # Two 48s plus another dimension.
+    #
+    # Example:
+    #   20, 48, 48
+    #
+    # Expected:
+    #   48 x 48 x 20
+    #
+    if values.count(48) == 2:
+
+        remaining = list(values)
+
+        remaining.remove(48)
+        remaining.remove(48)
+
+        other = remaining[0]
+
+        normalized = (
+            48,
+            48,
+            other,
+        )
+
+        adjusted = normalized != (
+            length,
+            width,
+            height,
+        )
+
+        return (
+            normalized[0],
+            normalized[1],
+            normalized[2],
+            adjusted,
+        )
+
+    #
+    # Preferred-length rule.
+    #
     preferred_matches = [
         v
         for v in values
         if v in PREFERRED_LENGTHS
     ]
 
-    # If exactly one dimension looks like a normal ULP length,
-    # use it as length.
     if len(preferred_matches) == 1:
 
         preferred_length = preferred_matches[0]
 
         # Already correct.
         if length == preferred_length:
-            return length, width, height, False
+            return (
+                length,
+                width,
+                height,
+                False,
+            )
 
-        # Document AI likely swapped length and height.
+        # Length and height were likely swapped.
         if height == preferred_length:
-            return height, width, length, True
+            return (
+                height,
+                width,
+                length,
+                True,
+            )
 
-        # Less common case:
-        # Document AI classified the preferred dimension as width.
+        # Less common:
+        # preferred length was classified as width.
         if width == preferred_length:
-            return width, length, height, True
+            return (
+                width,
+                length,
+                height,
+                True,
+            )
 
-    # If more than one dimension matches a preferred length,
-    # do not guess.
-    return length, width, height, False
+    #
+    # Ambiguous case:
+    # Keep Document AI's original interpretation.
+    #
+    return (
+        length,
+        width,
+        height,
+        False,
+    )
+
+
+def _reassign_dimension_confidences(
+    original_length,
+    original_width,
+    original_height,
+    normalized_length,
+    normalized_width,
+    normalized_height,
+    confidence,
+):
+    """
+    Move confidence values with dimensions when dimensions
+    are rearranged.
+    """
+
+    old = {
+        "length": confidence.get("length", 0.0),
+        "width": confidence.get("width", 0.0),
+        "height": confidence.get("height", 0.0),
+    }
+
+    originals = [
+        ("length", original_length),
+        ("width", original_width),
+        ("height", original_height),
+    ]
+
+    used = set()
+
+    def confidence_for_value(value):
+        for field_name, original_value in originals:
+
+            if field_name in used:
+                continue
+
+            if original_value == value:
+                used.add(field_name)
+                return old[field_name]
+
+        return 0.0
+
+    confidence["length"] = confidence_for_value(
+        normalized_length
+    )
+
+    confidence["width"] = confidence_for_value(
+        normalized_width
+    )
+
+    confidence["height"] = confidence_for_value(
+        normalized_height
+    )
 
 
 def _build_handling_units(
     entities: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Build handling units from repeated dimension / weight / location fields.
+    Build individual skids / handling units.
 
-    Only use locations on pages where dimensions or weights were
-    actually extracted. This avoids false-positive locations from
-    printed inventory tables.
+    A page is treated as a measurement page only if Document AI
+    extracted legitimate numeric dimension or weight data from it.
     """
 
     measurement_pages = set()
 
     for entity in entities:
-        if entity.get("type") in {
+
+        if entity.get("type") not in {
             "length",
             "width",
             "height",
             "weight",
         }:
-            page = entity.get("page")
+            continue
 
-            if page is not None:
-                measurement_pages.add(page)
+        numeric = _numeric_value(
+            entity.get("value")
+        )
 
+        if numeric is None:
+            continue
+
+        page = entity.get("page")
+
+        if page is not None:
+            measurement_pages.add(page)
+
+    #
+    # Ignore locations and other fields from ordinary product pages.
+    #
     handling_entities = [
         e
         for e in entities
         if e.get("page") in measurement_pages
     ]
 
-    lengths = _entities_by_type(
+    lengths = _numeric_entities_by_type(
         handling_entities,
         "length",
     )
 
-    widths = _entities_by_type(
+    widths = _numeric_entities_by_type(
         handling_entities,
         "width",
     )
 
-    heights = _entities_by_type(
+    heights = _numeric_entities_by_type(
         handling_entities,
         "height",
     )
 
-    weights = _entities_by_type(
+    weights = _numeric_entities_by_type(
         handling_entities,
         "weight",
     )
@@ -261,34 +383,25 @@ def _build_handling_units(
         confidence = {}
         pages = set()
 
-        field_lists = {
+        numeric_field_lists = {
             "length": lengths,
             "width": widths,
             "height": heights,
             "weight": weights,
-            "location": locations,
         }
 
-        for field_name, values in field_lists.items():
+        #
+        # Numeric fields.
+        #
+        for field_name, values in numeric_field_lists.items():
 
             if i < len(values):
 
                 entity = values[i]
 
-                raw_value = entity.get("value")
-
-                if field_name in {
-                    "length",
-                    "width",
-                    "height",
-                    "weight",
-                }:
-                    value = _numeric_value(raw_value)
-
-                else:
-                    value = raw_value
-
-                unit[field_name] = value
+                unit[field_name] = entity[
+                    "numeric_value"
+                ]
 
                 confidence[field_name] = float(
                     entity.get("confidence") or 0
@@ -305,7 +418,34 @@ def _build_handling_units(
                 confidence[field_name] = 0.0
 
         #
-        # Apply ULP-specific dimension normalization.
+        # Location.
+        #
+        if i < len(locations):
+
+            location_entity = locations[i]
+
+            unit["location"] = location_entity.get(
+                "value"
+            )
+
+            confidence["location"] = float(
+                location_entity.get(
+                    "confidence"
+                ) or 0
+            )
+
+            if location_entity.get("page") is not None:
+                pages.add(
+                    location_entity.get("page")
+                )
+
+        else:
+
+            unit["location"] = None
+            confidence["location"] = 0.0
+
+        #
+        # Normalize L/W/H.
         #
         original_length = unit.get("length")
         original_width = unit.get("width")
@@ -322,51 +462,25 @@ def _build_handling_units(
             original_height,
         )
 
-        #
-        # If dimensions were rearranged, move the associated
-        # confidence values along with them.
-        #
         if dimensions_adjusted:
 
-            old_confidence = {
-                "length": confidence.get("length", 0.0),
-                "width": confidence.get("width", 0.0),
-                "height": confidence.get("height", 0.0),
-            }
-
-            if normalized_length == original_height:
-                new_length_confidence = old_confidence["height"]
-            elif normalized_length == original_width:
-                new_length_confidence = old_confidence["width"]
-            else:
-                new_length_confidence = old_confidence["length"]
-
-            if normalized_width == original_length:
-                new_width_confidence = old_confidence["length"]
-            elif normalized_width == original_height:
-                new_width_confidence = old_confidence["height"]
-            else:
-                new_width_confidence = old_confidence["width"]
-
-            if normalized_height == original_length:
-                new_height_confidence = old_confidence["length"]
-            elif normalized_height == original_width:
-                new_height_confidence = old_confidence["width"]
-            else:
-                new_height_confidence = old_confidence["height"]
-
-            confidence["length"] = new_length_confidence
-            confidence["width"] = new_width_confidence
-            confidence["height"] = new_height_confidence
+            _reassign_dimension_confidences(
+                original_length,
+                original_width,
+                original_height,
+                normalized_length,
+                normalized_width,
+                normalized_height,
+                confidence,
+            )
 
         unit["length"] = normalized_length
         unit["width"] = normalized_width
         unit["height"] = normalized_height
 
-        #
-        # Helpful audit field.
-        #
-        unit["dimensions_adjusted"] = dimensions_adjusted
+        unit["dimensions_adjusted"] = (
+            dimensions_adjusted
+        )
 
         unit["confidence"] = confidence
 
@@ -401,8 +515,8 @@ def normalize_ulp_document(
     extraction_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Convert Document AI's flat entity list into
-    Sales Orders with shipment data and handling units.
+    Convert Document AI's flat entity list into structured
+    Sales Orders and handling units.
     """
 
     entities = extraction_result.get(
@@ -495,7 +609,7 @@ def normalize_ulp_document(
             ] = 0.0
 
         #
-        # Shipment-level fields.
+        # Shipment-level information.
         #
         for field_name in SHIPMENT_FIELDS:
 
@@ -504,14 +618,14 @@ def normalize_ulp_document(
                 field_name,
             )
 
-            order[
-                field_name
-            ] = _field_result(
-                best
+            order[field_name] = (
+                _field_result(
+                    best
+                )
             )
 
         #
-        # Individual handling units / skids.
+        # Individual skids.
         #
         order[
             "handling_units"
@@ -524,7 +638,7 @@ def normalize_ulp_document(
         )
 
     #
-    # Preserve original document order.
+    # Preserve document order.
     #
     sales_orders.sort(
         key=lambda order: (
