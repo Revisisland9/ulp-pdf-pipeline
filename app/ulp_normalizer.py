@@ -140,14 +140,13 @@ def _build_handling_units(
     weights = _entities_by_type(handling_entities, "weight")
     locations = _entities_by_type(handling_entities, "location")
 
-    count = max(
-        len(lengths),
-        len(widths),
-        len(heights),
-        len(weights),
-        len(locations),
-        default=0,
-    )
+count = max([
+    len(lengths),
+    len(widths),
+    len(heights),
+    len(weights),
+    len(locations),
+], default=0)
 
     units = []
 
