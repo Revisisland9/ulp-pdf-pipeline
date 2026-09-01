@@ -6,6 +6,7 @@ import base64
 from app.models import RenderEnvelope
 from app.pdf.shipment_confirmation import build_shipment_confirmation_pdf
 from app.document_ai import extract_ulp_document
+from app.ulp_normalizer import normalize_ulp_document
 
 
 app = FastAPI(title="ULP_PDF_PIPELINE", version="1.0")
@@ -71,11 +72,12 @@ async def extract_ulp_pdf(
     file: UploadFile = File(...)
 ):
     """
-    Accept a ULP PDF and send it to the
-    Google Document AI ULP Custom Extractor.
+    Accept a ULP PDF, send it to Google Document AI,
+    and normalize the extracted entities into
+    Sales Orders and handling units.
 
-    For the current processor, PDFs must be
-    15 pages or fewer.
+    Current synchronous Document AI processor limit:
+    15 pages per PDF.
     """
 
     if file.content_type != "application/pdf":
@@ -93,12 +95,19 @@ async def extract_ulp_pdf(
         )
 
     try:
-        result = extract_ulp_document(pdf_bytes)
+        # Step 1:
+        # Send the PDF to Google Document AI.
+        raw_result = extract_ulp_document(pdf_bytes)
+
+        # Step 2:
+        # Turn Google's flat entity list into
+        # structured Sales Orders / handling units.
+        normalized = normalize_ulp_document(raw_result)
 
         return JSONResponse({
             "ok": True,
             "filename": file.filename,
-            "result": result
+            "result": normalized
         })
 
     except Exception as exc:
