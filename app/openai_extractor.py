@@ -241,13 +241,11 @@ That means:
 SO-
 followed by exactly 8 digits.
 
-
 The master Sales Order may appear beside a printed field labeled:
 
 Sales order
 
 It may also correspond to the barcode on the top Pink sheet.
-
 
 Do NOT create a master Sales Order from any other identifier.
 
@@ -363,7 +361,6 @@ Examples:
 499 W ELM STREET
 1135 NM 554
 
-
 Common street words include:
 
 ST
@@ -394,7 +391,6 @@ PLACE
 TER
 TERRACE
 
-
 State-route style addresses may also look like:
 
 1135 NM 554
@@ -419,7 +415,6 @@ Examples include:
 - building or facility name
 - suite information
 
-
 Example Ship To block:
 
 HOA PLAYGROUND SERVICES LLC
@@ -427,7 +422,6 @@ QUEENSLAND MANOR
 MEAGAN BIRDSALL
 3580 SOUTH 144TH STREET
 GILBERT, AZ 85297
-
 
 Correct extraction:
 
@@ -448,7 +442,6 @@ AZ
 
 delivery_zip =
 85297
-
 
 Do NOT put a person's name into delivery_contact merely because
 the person's name appears in the Ship To address block.
@@ -548,7 +541,6 @@ Determine whether a number represents:
 - location
 - unrelated notation
 
-
 Example:
 
 48 x 44 / 756# / C27
@@ -564,7 +556,6 @@ location = C27
 It should NOT become:
 
 48 x 44 x 756
-
 
 Also do not split one visible number incorrectly.
 
@@ -941,55 +932,6 @@ def _top_crop(
     )
 
 
-def _center_top_crop(
-    image: Image.Image,
-) -> Image.Image:
-    """
-    Barcode/header-focused crop.
-
-    Remove some outside page margins while keeping
-    the upper half of the Pink.
-    """
-
-    left = int(
-        image.width * 0.05
-    )
-
-    right = int(
-        image.width * 0.95
-    )
-
-    bottom = int(
-        image.height * 0.55
-    )
-
-    return image.crop(
-        (
-            left,
-            0,
-            right,
-            bottom,
-        )
-    )
-
-
-def _threshold_image(
-    image: Image.Image,
-    threshold: int = 170,
-) -> Image.Image:
-
-    gray = ImageOps.grayscale(
-        image
-    )
-
-    return gray.point(
-        lambda p:
-            255
-            if p > threshold
-            else 0
-    )
-
-
 # ==========================================================
 # BARCODE DECODING
 # ==========================================================
@@ -1016,32 +958,28 @@ def _decode_page_barcodes(
     page_pdf_bytes: bytes,
 ) -> Dict[str, Any]:
     """
-    Try several barcode-oriented image representations.
+    Lightweight barcode pass.
 
-    No AI calls.
-    No token cost.
+    Try:
 
-    We attempt:
+    1. full page at 3x
+    2. top half at 4x
+    3. grayscale top half
+    4. autocontrast top half
 
-    1. full page ~288 DPI
-    2. top half ~288 DPI
-    3. high-resolution top crop ~432 DPI
-    4. grayscale high-resolution top crop
-    5. autocontrast top crop
-    6. thresholded top crop
-    7. inverted thresholded top crop
+    This is intentionally lighter than the previous version.
     """
 
     try:
 
+        image_3x = _render_pdf_page(
+            page_pdf_bytes,
+            3.0,
+        )
+
         image_4x = _render_pdf_page(
             page_pdf_bytes,
             4.0,
-        )
-
-        image_6x = _render_pdf_page(
-            page_pdf_bytes,
-            6.0,
         )
 
         top_4x = _top_crop(
@@ -1049,73 +987,35 @@ def _decode_page_barcodes(
             0.50,
         )
 
-        top_6x = _center_top_crop(
-            image_6x
+        gray_top = ImageOps.grayscale(
+            top_4x
         )
 
-        gray_6x = ImageOps.grayscale(
-            top_6x
-        )
-
-        autocontrast_6x = ImageOps.autocontrast(
-            gray_6x
-        )
-
-        threshold_160 = _threshold_image(
-            top_6x,
-            160,
-        )
-
-        threshold_190 = _threshold_image(
-            top_6x,
-            190,
-        )
-
-        inverted_160 = ImageOps.invert(
-            threshold_160.convert(
-                "L"
-            )
+        contrast_top = ImageOps.autocontrast(
+            gray_top
         )
 
         variants = [
             (
-                "full_4x",
-                image_4x,
+                "full_3x",
+                image_3x,
             ),
             (
                 "top_4x",
                 top_4x,
             ),
             (
-                "top_6x",
-                top_6x,
+                "gray_top_4x",
+                gray_top,
             ),
             (
-                "gray_top_6x",
-                gray_6x,
-            ),
-            (
-                "autocontrast_top_6x",
-                autocontrast_6x,
-            ),
-            (
-                "threshold_160",
-                threshold_160,
-            ),
-            (
-                "threshold_190",
-                threshold_190,
-            ),
-            (
-                "inverted_threshold_160",
-                inverted_160,
+                "contrast_top_4x",
+                contrast_top,
             ),
         ]
 
         decoded_values = []
-
         decoded_formats = []
-
         successful_variants = []
 
         barcode_so = None
@@ -1302,6 +1202,8 @@ def _repair_handling_unit(
     )
 
     # ------------------------------------------------------
+    # Example:
+    #
     # 48 x 44 x 756
     #
     # 756 is almost certainly weight, not height.
@@ -1390,15 +1292,14 @@ def _repair_handling_unit(
         )
 
     # ------------------------------------------------------
-    # MODEL SAYS:
+    # Model says:
     #
     # height=75
     # weight=756
     #
-    # while also saying height is unclear.
+    # but notes say height is unclear.
     #
-    # We trust the obvious weight and clear the questionable
-    # height instead of carrying contradictory data.
+    # Remove the questionable height.
     # ------------------------------------------------------
 
     height = hu.get(
@@ -1435,8 +1336,10 @@ def _repair_handling_unit(
             or "height is unclear" in note_text
             or "height is not legible" in note_text
             or "height is unreadable" in note_text
-            or "height" in note_text
-            and "unclear" in note_text
+            or (
+                "height" in note_text
+                and "unclear" in note_text
+            )
         ):
 
             questionable_height = height
@@ -1453,9 +1356,9 @@ def _repair_handling_unit(
                 hu,
                 (
                     f"Height {questionable_height} was removed "
-                    f"because the model itself identified the "
-                    f"height as unclear while weight {weight} "
-                    f"was independently identified."
+                    f"because the model identified the height "
+                    f"as unclear while weight {weight} was "
+                    f"independently identified."
                 )
             )
 
@@ -1731,7 +1634,6 @@ def _extract_page_with_gpt(
             or {}
         )
 
-        # Strict validation.
         page_result[
             "sales_order"
         ] = _validate_sales_order(
@@ -2072,6 +1974,8 @@ def _should_start_new_group(
         )
     )
 
+    # Different known SOs:
+    # hard shipment boundary.
     if (
         current_so
         and group_so
@@ -2081,6 +1985,7 @@ def _should_start_new_group(
         return True
 
     if not previous_page:
+
         return False
 
     similarity = _page_similarity_score(
@@ -2089,8 +1994,10 @@ def _should_start_new_group(
     )
 
     if similarity >= 8:
+
         return False
 
+    # Valid SO appears after unidentified shipment pages.
     if (
         current_so
         and not group_so
@@ -2113,6 +2020,7 @@ def _should_start_new_group(
     )
 
     if not has_identity:
+
         return False
 
     return True
@@ -2276,6 +2184,7 @@ def _merge_group_into_group(
         )
 
         if key in existing_keys:
+
             continue
 
         target[
@@ -2298,6 +2207,7 @@ def _backward_stitch_sales_orders(
 ]:
 
     if len(groups) < 2:
+
         return groups
 
     stitched = []
@@ -2578,12 +2488,11 @@ def extract_ulp_with_gpt(
         # --------------------------------------------------
         # MASTER SALES ORDER PRIORITY
         #
-        # A real machine-decoded SO barcode is the
-        # strongest source.
+        # BARCODE WINS IF IT DECODED AN ACTUAL SO-########.
         #
-        # Otherwise use a strictly valid GPT reading.
+        # OTHERWISE USE STRICTLY VALID GPT READING.
         #
-        # NEVER use SRP_number as fallback.
+        # SRP IS NEVER USED AS FALLBACK.
         # --------------------------------------------------
 
         if barcode_so:
@@ -2642,6 +2551,21 @@ def extract_ulp_with_gpt(
             "customer_PO":
                 page_result.get(
                     "customer_PO"
+                ),
+
+            "delivery_name":
+                page_result.get(
+                    "delivery_name"
+                ),
+
+            "delivery_address":
+                page_result.get(
+                    "delivery_address"
+                ),
+
+            "delivery_address2":
+                page_result.get(
+                    "delivery_address2"
                 ),
 
             "barcode_values":
