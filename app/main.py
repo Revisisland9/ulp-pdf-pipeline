@@ -6,10 +6,7 @@ import base64
 from app.models import RenderEnvelope
 from app.pdf.shipment_confirmation import build_shipment_confirmation_pdf
 
-from app.document_ai import extract_ulp_document
-from app.ulp_normalizer import normalize_ulp_document
 from app.sheet_mapper import build_sheet_rows
-
 from app.openai_extractor import extract_ulp_with_gpt
 
 
@@ -132,7 +129,7 @@ def render_shipment_confirmation_base64(
 
 
 # ==========================================================
-# EXISTING GOOGLE DOCUMENT AI ENDPOINT
+# PRODUCTION ULP INTAKE
 # ==========================================================
 
 @app.post(
@@ -142,16 +139,16 @@ async def extract_ulp_pdf(
     file: UploadFile = File(...)
 ):
     """
-    CURRENT PRODUCTION ULP WORKFLOW:
+    PRODUCTION ULP WORKFLOW:
 
     PDF
-      -> Google Document AI
-      -> normalized Sales Orders
+      -> Google Enterprise OCR
+      -> GPT vision / handwriting extraction
+      -> Python grouping + validation
       -> Sheet-ready rows
-      -> highlight instructions
+      -> existing Apps Script workflow
 
-    This endpoint remains unchanged while
-    the GPT extractor is tested separately.
+    Apps Script continues calling the SAME endpoint.
     """
 
     if (
@@ -173,45 +170,80 @@ async def extract_ulp_pdf(
 
     try:
 
-        #
-        # Step 1
-        # Google Document AI extraction
-        #
-        raw_result = (
-            extract_ulp_document(
+        # --------------------------------------------------
+        # STEP 1
+        # Hybrid Google OCR + GPT extraction
+        # --------------------------------------------------
+
+        hybrid_result = (
+            extract_ulp_with_gpt(
                 pdf_bytes
             )
         )
 
-        #
-        # Step 2
-        # Normalize extracted entities
-        #
-        normalized = (
-            normalize_ulp_document(
-                raw_result
-            )
-        )
+        # --------------------------------------------------
+        # STEP 2
+        # Pull grouped shipment records from hybrid result
+        # --------------------------------------------------
 
-        #
-        # Step 3
-        # Convert to Sheet-ready rows
-        #
+        normalized = {
+            "sales_orders":
+                (
+                    hybrid_result
+                    .get(
+                        "extraction",
+                        {}
+                    )
+                    .get(
+                        "sales_orders",
+                        []
+                    )
+                )
+        }
+
+        # --------------------------------------------------
+        # STEP 3
+        # Convert to existing Sheet-ready format
+        # --------------------------------------------------
+
         sheet_rows = (
             build_sheet_rows(
                 normalized
             )
         )
 
+        # --------------------------------------------------
+        # STEP 4
+        # Preserve existing production response contract
+        # --------------------------------------------------
+
         return JSONResponse({
-            "ok": True,
-            "filename": file.filename,
+            "ok":
+                True,
+
+            "filename":
+                file.filename,
 
             "result":
                 normalized,
 
             "sheet_rows":
                 sheet_rows,
+
+            # Helpful production diagnostics.
+            # Apps Script can ignore these.
+            "engine":
+                "google_ocr_plus_gpt",
+
+            "usage":
+                hybrid_result.get(
+                    "usage"
+                ),
+
+            "google_ocr":
+                hybrid_result.get(
+                    "google_ocr"
+                ),
         })
 
     except Exception as exc:
@@ -219,14 +251,14 @@ async def extract_ulp_pdf(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Document extraction failed: "
+                "Hybrid document extraction failed: "
                 f"{str(exc)}"
             ),
         )
 
 
 # ==========================================================
-# GPT TEST ENDPOINT
+# GPT / HYBRID TEST ENDPOINT
 # ==========================================================
 
 @app.post(
@@ -236,21 +268,16 @@ async def extract_ulp_gpt_test(
     file: UploadFile = File(...)
 ):
     """
-    TEMPORARY GPT TEST ENDPOINT.
+    Diagnostic endpoint.
 
-    This does NOT replace the existing
-    Google Document AI endpoint.
+    Returns the full hybrid result including:
+    - page debug
+    - Google OCR Sales Orders
+    - GPT extraction
+    - token usage
+    - grouped shipments
 
-    For now, this endpoint verifies that:
-
-    - Cloud Run can access OPENAI_API_KEY
-    - the OpenAI Python SDK is installed
-    - Cloud Run can successfully call OpenAI
-    - PDF upload routing works
-
-    The actual PDF / vision extraction logic
-    will be added to openai_extractor.py
-    after this connection test succeeds.
+    Keep this endpoint available for troubleshooting.
     """
 
     if (
@@ -279,7 +306,9 @@ async def extract_ulp_gpt_test(
         )
 
         return JSONResponse({
-            "ok": True,
+            "ok":
+                True,
+
             "filename":
                 file.filename,
 
