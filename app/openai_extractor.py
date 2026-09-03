@@ -9,7 +9,6 @@ from pypdf import PdfReader, PdfWriter
 
 
 MODEL = "gpt-5.4-mini"
-
 CHUNK_SIZE = 1
 
 
@@ -58,92 +57,72 @@ def _get_client():
 
 
 # ==========================================================
-# RESPONSE SCHEMA
+# MAIN PAGE RESPONSE SCHEMA
 # ==========================================================
 
 ULP_SCHEMA = {
     "type": "object",
     "properties": {
-
         "page": {
             "type": "object",
             "properties": {
-
                 "sales_order": {
                     "type": ["string", "null"]
                 },
-
                 "customer_PO": {
                     "type": ["string", "null"]
                 },
-
                 "SRP_number": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_name": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_address": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_address2": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_city": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_state": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_zip": {
                     "type": ["string", "null"]
                 },
-
                 "delivery_contact": {
                     "type": ["string", "null"]
                 },
-
                 "handling_units": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-
                             "length": {
                                 "type": ["number", "null"]
                             },
-
                             "width": {
                                 "type": ["number", "null"]
                             },
-
                             "height": {
                                 "type": ["number", "null"]
                             },
-
                             "weight": {
                                 "type": ["number", "null"]
                             },
-
                             "location": {
                                 "type": ["string", "null"]
                             },
-
                             "uncertain": {
                                 "type": "boolean"
                             },
-
                             "notes": {
                                 "type": ["string", "null"]
                             }
                         },
-
                         "required": [
                             "length",
                             "width",
@@ -153,12 +132,10 @@ ULP_SCHEMA = {
                             "uncertain",
                             "notes"
                         ],
-
                         "additionalProperties": False
                     }
                 }
             },
-
             "required": [
                 "sales_order",
                 "customer_PO",
@@ -172,21 +149,36 @@ ULP_SCHEMA = {
                 "delivery_contact",
                 "handling_units"
             ],
-
             "additionalProperties": False
         }
     },
-
     "required": [
         "page"
     ],
-
     "additionalProperties": False
 }
 
 
 # ==========================================================
-# GPT INSTRUCTIONS
+# SALES ORDER RECOVERY SCHEMA
+# ==========================================================
+
+SALES_ORDER_ONLY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sales_order": {
+            "type": ["string", "null"]
+        }
+    },
+    "required": [
+        "sales_order"
+    ],
+    "additionalProperties": False
+}
+
+
+# ==========================================================
+# MAIN PAGE PROMPT
 # ==========================================================
 
 EXTRACTION_INSTRUCTIONS = """
@@ -201,10 +193,10 @@ If something is not visible on THIS PAGE, return null.
 
 
 ============================================================
-SALES ORDER — CRITICAL
+SALES ORDER
 ============================================================
 
-You must actively search the ENTIRE PAGE for the Sales Order.
+Actively search the entire page for a valid ULP Sales Order.
 
 Valid ULP Sales Orders look exactly like:
 
@@ -215,45 +207,23 @@ Format:
 SO-
 followed by exactly 8 digits.
 
+The Sales Order may appear:
 
-============================================================
-BARCODE RULE — CRITICAL
-============================================================
+- next to the printed label "Sales order"
+- in the upper portion of a Pink sheet
+- in a barcode/header region
+- on a packing list
 
-On the top ULP Pink sheet, the barcode corresponds to the Sales Order
-number.
-
-The barcode value is authoritative for identifying the Sales Order.
-
-When extracting sales_order, use this order of preference:
-
-1. Read the printed "Sales order" field if clearly visible.
-2. Also inspect the barcode and any human-readable value associated
-   with the barcode.
-3. If the printed field is unclear or missed, use the barcode value
-   if it resolves to a valid SO-######## Sales Order.
-4. If both are visible and agree, return that Sales Order.
-5. If neither produces a valid SO-######## value, return null.
-
-Do NOT return unrelated references containing "SO".
-
-For example, do NOT treat these as Sales Orders:
+Do NOT return unrelated references such as:
 
 SO 322733
 ORG SO 322733
 322733
 
-Those may be notes or prior-order references.
+If you cannot confidently find a valid SO-######## on this page,
+return null.
 
-Before returning sales_order=null, perform one final visual scan of:
-
-- the printed Sales order field
-- the top header area
-- the barcode area
-- any human-readable text associated with the barcode
-
-Never guess a Sales Order from customer PO, consignee, packing-list
-number, or another reference.
+Never infer Sales Order from customer PO or consignee.
 
 
 ============================================================
@@ -273,23 +243,19 @@ When visibly present, extract:
 - delivery_zip
 - delivery_contact
 
-Preserve visible wording faithfully.
-
 
 ============================================================
 ADDRESS RULES
 ============================================================
 
 delivery_name:
-the business, organization, institution, school, municipality,
-customer, or destination name.
+business, institution, school, municipality, customer, or destination.
 
 delivery_address:
 primary street address.
 
 delivery_address2:
-ATTN/person name, project name, suite, secondary address information,
-or other clearly secondary destination information.
+ATTN/person name, project name, suite, secondary address information.
 
 Do not invent Address 2.
 
@@ -298,11 +264,9 @@ Do not invent Address 2.
 HANDLING UNITS
 ============================================================
 
-This is the most important visual extraction task.
-
 Find EVERY genuine handwritten pallet / handling-unit notation.
 
-Typical examples:
+Examples:
 
 48 x 45 x 26 / 97# / B8
 
@@ -310,9 +274,7 @@ Typical examples:
 
 48 x 48 x 17 / 88# / D19E
 
-There may be more than one handling unit on the page.
-
-For every genuine handling unit extract:
+Extract:
 
 - length
 - width
@@ -322,14 +284,14 @@ For every genuine handling unit extract:
 
 
 ============================================================
-DIMENSION ORDER
+DIMENSIONS / WEIGHT
 ============================================================
 
 Dimensions normally appear:
 
 L x W x H
 
-Typical shipment lengths include:
+Typical lengths:
 
 48
 72
@@ -340,7 +302,7 @@ Typical shipment lengths include:
 120
 144
 
-Typical pallet widths are commonly around:
+Typical widths:
 
 40
 42
@@ -348,174 +310,76 @@ Typical pallet widths are commonly around:
 45
 48
 
-These are contextual clues only.
+The # symbol commonly means pounds.
 
-The visual handwriting is the primary source.
-
-
-============================================================
-IMPORTANT NUMBER-ROLE CHECK
-============================================================
-
-When reading a handwritten sequence, determine whether each number
-is actually:
-
-- a dimension
-- a weight
-- a location
-- another unrelated number
-
-Do NOT automatically treat the first three visible numbers as
-L x W x H.
+Do not automatically treat the first three numbers as dimensions.
 
 For example:
 
 48 x 44 / 756# / C27
 
-should NOT become:
+should not become:
 
 48 x 44 x 756
 
-because 756 is much more plausible as shipment weight than as a
-756-inch pallet height.
-
-Also be careful not to split one handwritten number incorrectly.
-
-For example:
+Also do not split:
 
 756
 
-should not casually become:
+into:
 
-height = 75
-weight = 6
+75 and 6
 
-Look carefully for:
-
-- #
-- lb / lbs
-- dashes
-- slashes
-- spacing
-- visual grouping
-- placement next to the location code
+unless the handwriting clearly supports that.
 
 
 ============================================================
-AMBIGUOUS HANDWRITING
+AMBIGUITY
 ============================================================
 
-Be particularly careful with visually reversible handwritten values,
-for example:
+Be careful with values such as:
 
-19 versus 91
-17 versus 71
-14 versus 41
-24 versus 74
+19 vs 91
+17 vs 71
+14 vs 41
+24 vs 74
 
-Use the actual pen strokes and surrounding shipping context.
+If genuinely ambiguous:
 
-If still ambiguous:
-
-- return the most likely visible interpretation
+- use the most likely visible interpretation
 - set uncertain=true
-- explain the ambiguity briefly in notes
-
-Do not silently transpose digits only because another number seems
-more common.
-
-
-============================================================
-TWO 48 RULE
-============================================================
-
-If handwriting clearly shows two 48 dimensions and another
-dimension, the intended orientation may be:
-
-48 x 48 x other
-
-Use this as context, not as permission to override clearly visible
-handwriting.
-
-
-============================================================
-WEIGHT
-============================================================
-
-The # symbol commonly indicates pounds.
-
-Examples:
-
-88# = 88 pounds
-294# = 294 pounds
-756# = 756 pounds
-
-Do not confuse quantity or product numbers with pallet weight.
-
-
-============================================================
-LOCATION
-============================================================
-
-Location is normally a short handwritten warehouse / staging code.
-
-Examples:
-
-B8
-D24
-D22E
-D19E
-C21-2
-C27
-07
-09
-A19-E
-
-Do not append unrelated handwriting.
+- explain briefly in notes
 
 
 ============================================================
 PRINTED PRODUCT TABLES
 ============================================================
 
-Do NOT use printed product dimensions, catalog measurements,
-item descriptions, quantities, or product-table measurements as
-handling-unit dimensions.
-
-Handling-unit measurements must come from genuine handwritten
-shipping notation.
+Do NOT use printed catalog/product dimensions as pallet dimensions.
 
 
 ============================================================
 DO NOT CREATE FAKE HANDLING UNITS
 ============================================================
 
-Handwriting alone does NOT mean a handling unit exists.
-
-Do not create a handling-unit object from:
+Do not create an HU from:
 
 - initials
 - signatures
-- packed quantities
 - check marks
-- a lone location code
+- lone locations
 - one isolated number
-- random notes
-- marks in Packed / Back Order / Sign columns
+- miscellaneous handwriting
+- packed quantities
 
-A genuine handling unit normally has meaningful structure such as:
-
-- multiple dimensions
-- dimensions plus weight
-- dimensions plus location
-- clearly organized pallet notation
+A genuine HU should have meaningful pallet structure.
 
 
 ============================================================
-INCOMPLETE HANDLING UNITS
+INCOMPLETE HANDLING UNIT
 ============================================================
 
-A real pallet may still have one unreadable value.
+A real HU may still have one unreadable field.
 
 Example:
 
@@ -530,41 +394,61 @@ weight = 294
 location = C21-2
 uncertain = true
 
-Do not discard an otherwise genuine handling unit merely because
-one component is unreadable.
-
 
 ============================================================
-UNCERTAINTY
-============================================================
-
-Never invent unreadable values.
-
-Use null for unreadable values.
-
-Set uncertain=true whenever a genuine handling-unit value is
-ambiguous.
-
-Use notes to briefly explain why.
-
-Do not manufacture numeric confidence percentages.
-
-
-============================================================
-FINAL PAGE CHECK
+FINAL CHECK
 ============================================================
 
 Before responding:
 
-1. Re-scan the printed Sales order field.
-2. Re-scan the barcode area for the Sales Order.
-3. Confirm sales_order matches SO-######## or return null.
-4. Re-scan the entire page for handwritten pallet notation.
-5. Count the genuine handling units.
-6. Verify every genuine handling unit was returned.
-7. Verify weights were not mistaken for dimensions.
-8. Verify printed product dimensions were ignored.
-9. Verify miscellaneous handwriting was not converted into a pallet.
+1. Search again for a valid SO-########.
+2. Re-scan all handwriting for pallet notation.
+3. Confirm weights were not mistaken for dimensions.
+4. Confirm printed product dimensions were ignored.
+5. Confirm random handwriting was not turned into a pallet.
+"""
+
+
+# ==========================================================
+# TARGETED SALES ORDER PROMPT
+# ==========================================================
+
+SALES_ORDER_RECOVERY_INSTRUCTIONS = """
+Your ONLY job is to find the ULP Sales Order on this single page.
+
+Inspect the page very carefully.
+
+A valid Sales Order has exactly this format:
+
+SO-########
+
+Example:
+
+SO-00325352
+
+Search specifically:
+
+1. next to the printed label "Sales order"
+2. the upper/header portion of the page
+3. the barcode area
+4. human-readable text associated with the barcode
+
+On a ULP Pink sheet, the barcode corresponds to the Sales Order.
+
+Do NOT return:
+
+- Customer PO
+- customer reference
+- packing-list number
+- ORG SO notes
+- values like "SO 322733"
+
+Only return a value if it matches:
+
+SO-
+followed by exactly 8 digits.
+
+If no valid Sales Order is actually visible, return null.
 """
 
 
@@ -710,6 +594,203 @@ def _validate_sales_order(
 
 
 # ==========================================================
+# DETERMINE WHETHER SO RECOVERY IS WORTH RUNNING
+# ==========================================================
+
+def _should_attempt_so_recovery(
+    page_result: Dict[str, Any]
+) -> bool:
+
+    if _validate_sales_order(
+        page_result.get(
+            "sales_order"
+        )
+    ):
+        return False
+
+    # Only run the extra call when the page contains
+    # meaningful shipment/header information.
+    return any(
+        _clean_string(
+            page_result.get(
+                field
+            )
+        )
+        for field in [
+            "customer_PO",
+            "delivery_name",
+            "delivery_address",
+            "delivery_zip",
+            "SRP_number",
+        ]
+    )
+
+
+# ==========================================================
+# TARGETED SALES ORDER RECOVERY
+# ==========================================================
+
+def _recover_sales_order_with_gpt(
+    client,
+    page_pdf_bytes: bytes,
+    original_page_number: int,
+):
+
+    uploaded_file_id = None
+
+    try:
+
+        pdf_file = BytesIO(
+            page_pdf_bytes
+        )
+
+        pdf_file.name = (
+            f"ulp_so_recovery_"
+            f"{original_page_number}.pdf"
+        )
+
+        uploaded_file = (
+            client.files.create(
+                file=pdf_file,
+                purpose="user_data",
+            )
+        )
+
+        uploaded_file_id = (
+            uploaded_file.id
+        )
+
+        response = (
+            client.responses.create(
+                model=MODEL,
+
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text":
+                                    SALES_ORDER_RECOVERY_INSTRUCTIONS,
+                            },
+                            {
+                                "type": "input_file",
+                                "file_id":
+                                    uploaded_file_id,
+                            },
+                        ],
+                    }
+                ],
+
+                text={
+                    "format": {
+                        "type":
+                            "json_schema",
+
+                        "name":
+                            "ulp_sales_order_recovery",
+
+                        "strict":
+                            True,
+
+                        "schema":
+                            SALES_ORDER_ONLY_SCHEMA,
+                    }
+                },
+            )
+        )
+
+        output_text = (
+            response.output_text
+            or ""
+        ).strip()
+
+        if not output_text:
+
+            return (
+                None,
+                {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+
+        try:
+
+            extracted = json.loads(
+                output_text
+            )
+
+        except json.JSONDecodeError:
+
+            return (
+                None,
+                {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+
+        sales_order = (
+            _validate_sales_order(
+                extracted.get(
+                    "sales_order"
+                )
+            )
+        )
+
+        usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+
+        if response.usage:
+
+            usage[
+                "input_tokens"
+            ] = (
+                response.usage.input_tokens
+                or 0
+            )
+
+            usage[
+                "output_tokens"
+            ] = (
+                response.usage.output_tokens
+                or 0
+            )
+
+            usage[
+                "total_tokens"
+            ] = (
+                response.usage.total_tokens
+                or 0
+            )
+
+        return (
+            sales_order,
+            usage,
+        )
+
+    finally:
+
+        if uploaded_file_id:
+
+            try:
+
+                client.files.delete(
+                    uploaded_file_id
+                )
+
+            except Exception:
+
+                pass
+
+
+# ==========================================================
 # HANDLING UNIT HELPERS
 # ==========================================================
 
@@ -784,7 +865,7 @@ def _repair_handling_unit(
         )
     )
 
-    # 48 x 44 x 756 -> likely 756 lb.
+    # 48 x 44 x 756 -> likely 756 lb
     if (
         height is not None
         and height >= 240
@@ -831,7 +912,7 @@ def _repair_handling_unit(
         "weight"
     )
 
-    # Possible 756 -> 75 + 6 split.
+    # Possible 756 -> 75 + 6 split
     if (
         uncertain
         and height is not None
@@ -1014,23 +1095,18 @@ def _handling_unit_key(
         hu.get(
             "page"
         ),
-
         hu.get(
             "length"
         ),
-
         hu.get(
             "width"
         ),
-
         hu.get(
             "height"
         ),
-
         hu.get(
             "weight"
         ),
-
         _normalize_compare_string(
             hu.get(
                 "location"
@@ -1040,7 +1116,7 @@ def _handling_unit_key(
 
 
 # ==========================================================
-# GPT PAGE EXTRACTION
+# MAIN GPT PAGE EXTRACTION
 # ==========================================================
 
 def _extract_page_with_gpt(
@@ -1079,9 +1155,7 @@ def _extract_page_with_gpt(
 
                 input=[
                     {
-                        "role":
-                            "user",
-
+                        "role": "user",
                         "content": [
                             {
                                 "type":
@@ -1090,7 +1164,6 @@ def _extract_page_with_gpt(
                                 "text":
                                     EXTRACTION_INSTRUCTIONS,
                             },
-
                             {
                                 "type":
                                     "input_file",
@@ -1131,18 +1204,9 @@ def _extract_page_with_gpt(
                 "OpenAI returned no extraction output."
             )
 
-        try:
-
-            extracted = json.loads(
-                output_text
-            )
-
-        except json.JSONDecodeError as exc:
-
-            raise RuntimeError(
-                "OpenAI returned invalid JSON: "
-                f"{str(exc)}"
-            )
+        extracted = json.loads(
+            output_text
+        )
 
         page_result = (
             extracted.get(
@@ -1151,7 +1215,6 @@ def _extract_page_with_gpt(
             or {}
         )
 
-        # Strict Sales Order validation.
         page_result[
             "sales_order"
         ] = _validate_sales_order(
@@ -1160,7 +1223,6 @@ def _extract_page_with_gpt(
             )
         )
 
-        # Python owns page numbering.
         page_result[
             "page"
         ] = (
@@ -1178,20 +1240,14 @@ def _extract_page_with_gpt(
 
             hu[
                 "page"
-            ] = (
-                original_page_number
+            ] = original_page_number
+
+            hu = _repair_handling_unit(
+                hu
             )
 
-            hu = (
-                _repair_handling_unit(
-                    hu
-                )
-            )
-
-            if (
-                _handling_unit_has_real_data(
-                    hu
-                )
+            if _handling_unit_has_real_data(
+                hu
             ):
 
                 cleaned_hus.append(
@@ -1203,14 +1259,9 @@ def _extract_page_with_gpt(
         ] = cleaned_hus
 
         usage = {
-            "input_tokens":
-                0,
-
-            "output_tokens":
-                0,
-
-            "total_tokens":
-                0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
         }
 
         if response.usage:
@@ -1268,72 +1319,44 @@ def _page_similarity_score(
     score = 0
 
     if _field_matches(
-        a.get(
-            "customer_PO"
-        ),
-        b.get(
-            "customer_PO"
-        ),
+        a.get("customer_PO"),
+        b.get("customer_PO"),
     ):
         score += 12
 
     if _field_matches(
-        a.get(
-            "delivery_zip"
-        ),
-        b.get(
-            "delivery_zip"
-        ),
+        a.get("delivery_zip"),
+        b.get("delivery_zip"),
     ):
         score += 6
 
     if _field_matches(
-        a.get(
-            "delivery_name"
-        ),
-        b.get(
-            "delivery_name"
-        ),
+        a.get("delivery_name"),
+        b.get("delivery_name"),
     ):
         score += 5
 
     if _field_matches(
-        a.get(
-            "delivery_address"
-        ),
-        b.get(
-            "delivery_address"
-        ),
+        a.get("delivery_address"),
+        b.get("delivery_address"),
     ):
         score += 5
 
     if _field_matches(
-        a.get(
-            "delivery_city"
-        ),
-        b.get(
-            "delivery_city"
-        ),
+        a.get("delivery_city"),
+        b.get("delivery_city"),
     ):
         score += 2
 
     if _field_matches(
-        a.get(
-            "delivery_state"
-        ),
-        b.get(
-            "delivery_state"
-        ),
+        a.get("delivery_state"),
+        b.get("delivery_state"),
     ):
         score += 1
 
     if _field_matches(
-        a.get(
-            "delivery_contact"
-        ),
-        b.get(
-            "delivery_contact"
-        ),
+        a.get("delivery_contact"),
+        b.get("delivery_contact"),
     ):
         score += 2
 
@@ -1360,41 +1383,18 @@ SHIPMENT_FIELDS = [
 def _new_shipment_group():
 
     return {
-        "sales_order":
-            None,
-
-        "pages":
-            [],
-
-        "customer_PO":
-            None,
-
-        "SRP_number":
-            None,
-
-        "delivery_name":
-            None,
-
-        "delivery_address":
-            None,
-
-        "delivery_address2":
-            None,
-
-        "delivery_city":
-            None,
-
-        "delivery_state":
-            None,
-
-        "delivery_zip":
-            None,
-
-        "delivery_contact":
-            None,
-
-        "handling_units":
-            [],
+        "sales_order": None,
+        "pages": [],
+        "customer_PO": None,
+        "SRP_number": None,
+        "delivery_name": None,
+        "delivery_address": None,
+        "delivery_address2": None,
+        "delivery_city": None,
+        "delivery_state": None,
+        "delivery_zip": None,
+        "delivery_contact": None,
+        "handling_units": [],
     }
 
 
@@ -1403,10 +1403,8 @@ def _merge_page_into_group(
     page: Dict[str, Any],
 ):
 
-    page_number = (
-        page.get(
-            "page"
-        )
+    page_number = page.get(
+        "page"
     )
 
     if (
@@ -1422,11 +1420,9 @@ def _merge_page_into_group(
             page_number
         )
 
-    page_so = (
-        _validate_sales_order(
-            page.get(
-                "sales_order"
-            )
+    page_so = _validate_sales_order(
+        page.get(
+            "sales_order"
         )
     )
 
@@ -1470,10 +1466,8 @@ def _merge_page_into_group(
         or []
     ):
 
-        key = (
-            _handling_unit_key(
-                hu
-            )
+        key = _handling_unit_key(
+            hu
         )
 
         if key in existing_keys:
@@ -1491,7 +1485,7 @@ def _merge_page_into_group(
 
 
 # ==========================================================
-# FIRST PASS GROUPING
+# GROUP BOUNDARIES
 # ==========================================================
 
 def _should_start_new_group(
@@ -1507,19 +1501,15 @@ def _should_start_new_group(
     ]:
         return False
 
-    current_so = (
-        _validate_sales_order(
-            current_page.get(
-                "sales_order"
-            )
+    current_so = _validate_sales_order(
+        current_page.get(
+            "sales_order"
         )
     )
 
-    group_so = (
-        _validate_sales_order(
-            current_group.get(
-                "sales_order"
-            )
+    group_so = _validate_sales_order(
+        current_group.get(
+            "sales_order"
         )
     )
 
@@ -1529,17 +1519,14 @@ def _should_start_new_group(
         and current_so
         != group_so
     ):
-
         return True
 
     if not previous_page:
         return False
 
-    similarity = (
-        _page_similarity_score(
-            previous_page,
-            current_page,
-        )
+    similarity = _page_similarity_score(
+        previous_page,
+        current_page,
     )
 
     if similarity >= 8:
@@ -1572,7 +1559,7 @@ def _should_start_new_group(
 
 
 # ==========================================================
-# BACKWARD SALES ORDER STITCHING
+# BACKWARD SO STITCHING
 # ==========================================================
 
 def _group_has_identity(
@@ -1620,9 +1607,7 @@ def _group_is_so_only_or_packing_list(
         )
     )
 
-    return (
-        identity_count <= 1
-    )
+    return identity_count <= 1
 
 
 def _groups_are_adjacent(
@@ -1671,18 +1656,15 @@ def _merge_group_into_group(
         if page not in target[
             "pages"
         ]:
-
             target[
                 "pages"
             ].append(
                 page
             )
 
-    source_so = (
-        _validate_sales_order(
-            source.get(
-                "sales_order"
-            )
+    source_so = _validate_sales_order(
+        source.get(
+            "sales_order"
         )
     )
 
@@ -1726,10 +1708,8 @@ def _merge_group_into_group(
         or []
     ):
 
-        key = (
-            _handling_unit_key(
-                hu
-            )
+        key = _handling_unit_key(
+            hu
         )
 
         if key in existing_keys:
@@ -1754,18 +1734,14 @@ def _backward_stitch_sales_orders(
     Dict[str, Any]
 ]:
 
-    if len(
-        groups
-    ) < 2:
+    if len(groups) < 2:
         return groups
 
     stitched = []
 
     i = 0
 
-    while i < len(
-        groups
-    ):
+    while i < len(groups):
 
         current = groups[
             i
@@ -1773,9 +1749,7 @@ def _backward_stitch_sales_orders(
 
         if (
             i + 1
-            < len(
-                groups
-            )
+            < len(groups)
         ):
 
             nxt = groups[
@@ -1824,7 +1798,7 @@ def _backward_stitch_sales_orders(
 
 
 # ==========================================================
-# GROUP PAGES INTO SHIPMENTS
+# GROUP PAGES
 # ==========================================================
 
 def _group_pages_into_shipments(
@@ -1837,9 +1811,7 @@ def _group_pages_into_shipments(
 
     groups = []
 
-    current_group = (
-        _new_shipment_group()
-    )
+    current_group = _new_shipment_group()
 
     previous_page = None
 
@@ -1859,9 +1831,7 @@ def _group_pages_into_shipments(
                     current_group
                 )
 
-            current_group = (
-                _new_shipment_group()
-            )
+            current_group = _new_shipment_group()
 
         _merge_page_into_group(
             current_group,
@@ -1878,10 +1848,8 @@ def _group_pages_into_shipments(
             current_group
         )
 
-    groups = (
-        _backward_stitch_sales_orders(
-            groups
-        )
+    groups = _backward_stitch_sales_orders(
+        groups
     )
 
     for group in groups:
@@ -1922,44 +1890,40 @@ def extract_ulp_with_gpt(
 ):
 
     if not pdf_bytes:
-
         raise ValueError(
             "PDF is empty."
         )
 
-    total_pages = (
-        _get_page_count(
-            pdf_bytes
-        )
+    total_pages = _get_page_count(
+        pdf_bytes
     )
 
     if total_pages <= 0:
-
         raise ValueError(
             "PDF contains no pages."
         )
 
-    client = (
-        _get_client()
-    )
+    client = _get_client()
 
     page_results = []
-
     page_debug = []
 
     total_usage = {
-        "input_tokens":
-            0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
 
-        "output_tokens":
-            0,
-
-        "total_tokens":
-            0,
+    recovery_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "attempts": 0,
+        "successes": 0,
     }
 
     # ======================================================
-    # ONE PAGE PER GPT REQUEST
+    # ONE PAGE AT A TIME
     # ======================================================
 
     for page_index in range(
@@ -1970,11 +1934,9 @@ def extract_ulp_with_gpt(
             page_index + 1
         )
 
-        page_pdf = (
-            _make_single_page_pdf(
-                pdf_bytes,
-                page_index,
-            )
+        page_pdf = _make_single_page_pdf(
+            pdf_bytes,
+            page_index,
         )
 
         page_result, usage = (
@@ -1989,6 +1951,61 @@ def extract_ulp_with_gpt(
                     page_number,
             )
         )
+
+        # ==================================================
+        # TARGETED SO RECOVERY
+        # ==================================================
+
+        recovered_so = None
+
+        if _should_attempt_so_recovery(
+            page_result
+        ):
+
+            recovery_usage[
+                "attempts"
+            ] += 1
+
+            recovered_so, so_usage = (
+                _recover_sales_order_with_gpt(
+                    client=
+                        client,
+
+                    page_pdf_bytes=
+                        page_pdf,
+
+                    original_page_number=
+                        page_number,
+                )
+            )
+
+            recovery_usage[
+                "input_tokens"
+            ] += so_usage[
+                "input_tokens"
+            ]
+
+            recovery_usage[
+                "output_tokens"
+            ] += so_usage[
+                "output_tokens"
+            ]
+
+            recovery_usage[
+                "total_tokens"
+            ] += so_usage[
+                "total_tokens"
+            ]
+
+            if recovered_so:
+
+                page_result[
+                    "sales_order"
+                ] = recovered_so
+
+                recovery_usage[
+                    "successes"
+                ] += 1
 
         page_results.append(
             page_result
@@ -2021,6 +2038,9 @@ def extract_ulp_with_gpt(
                     "sales_order"
                 ),
 
+            "sales_order_recovered":
+                recovered_so,
+
             "customer_PO":
                 page_result.get(
                     "customer_PO"
@@ -2038,9 +2058,24 @@ def extract_ulp_with_gpt(
                 usage,
         })
 
-    # ======================================================
-    # PYTHON ASSEMBLES SHIPMENTS
-    # ======================================================
+    # Include recovery tokens in grand total.
+    total_usage[
+        "input_tokens"
+    ] += recovery_usage[
+        "input_tokens"
+    ]
+
+    total_usage[
+        "output_tokens"
+    ] += recovery_usage[
+        "output_tokens"
+    ]
+
+    total_usage[
+        "total_tokens"
+    ] += recovery_usage[
+        "total_tokens"
+    ]
 
     grouped_shipments = (
         _group_pages_into_shipments(
@@ -2071,6 +2106,33 @@ def extract_ulp_with_gpt(
 
         "usage":
             total_usage,
+
+        "sales_order_recovery": {
+            "attempts":
+                recovery_usage[
+                    "attempts"
+                ],
+
+            "successes":
+                recovery_usage[
+                    "successes"
+                ],
+
+            "input_tokens":
+                recovery_usage[
+                    "input_tokens"
+                ],
+
+            "output_tokens":
+                recovery_usage[
+                    "output_tokens"
+                ],
+
+            "total_tokens":
+                recovery_usage[
+                    "total_tokens"
+                ],
+        },
 
         "pages":
             page_debug,
