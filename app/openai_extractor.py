@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,30 @@ from pypdf import PdfReader, PdfWriter
 MODEL = "gpt-5.4-mini"
 
 CHUNK_SIZE = 1
+
+
+# ==========================================================
+# BUSINESS RULES
+# ==========================================================
+
+SALES_ORDER_PATTERN = re.compile(
+    r"^SO-\d{8}$",
+    re.IGNORECASE,
+)
+
+PREFERRED_LENGTHS = {
+    48,
+    72,
+    74,
+    79,
+    96,
+    98,
+    120,
+    144,
+}
+
+MIN_TYPICAL_WIDTH = 30
+MAX_TYPICAL_WIDTH = 60
 
 
 # ==========================================================
@@ -181,9 +206,14 @@ SALES ORDER — IMPORTANT
 
 Actively search the ENTIRE PAGE for a Sales Order number.
 
-Sales Order numbers commonly look like:
+Valid ULP Sales Orders normally look exactly like:
 
 SO-00325355
+
+In other words:
+
+SO-
+followed by exactly 8 digits.
 
 They may appear:
 
@@ -193,9 +223,18 @@ They may appear:
 - in smaller printed text than the main shipment information
 
 Before returning sales_order=null, make one final visual search of
-the entire page specifically for a value beginning with "SO-".
+the entire page specifically for a valid value beginning with "SO-".
 
-Only return a Sales Order when it is actually visible.
+Do NOT return values such as:
+
+SO 322733
+ORG SO 322733
+322733
+
+Those may be notes or references, not the true Sales Order.
+
+Only return a Sales Order when it is actually visible and matches the
+ULP Sales Order format.
 
 Never guess a Sales Order from a customer PO, customer reference,
 packing-list number, consignee, or other field.
@@ -323,6 +362,17 @@ should NOT become:
 
 because 756 is much more plausible as shipment weight than as a
 756-inch pallet height.
+
+Also be careful not to split one handwritten number incorrectly.
+
+For example:
+
+756
+
+should not casually become:
+
+height = 75
+weight = 6
 
 Look carefully for:
 
@@ -490,7 +540,8 @@ FINAL PAGE CHECK
 
 Before responding:
 
-1. Re-scan the entire page specifically for a Sales Order beginning SO-.
+1. Re-scan the entire page specifically for a valid Sales Order
+   formatted SO-########.
 2. Re-scan the entire page for handwritten pallet notation.
 3. Count the genuine handling units.
 4. Verify every genuine handling unit was returned.
@@ -617,7 +668,43 @@ def _first_nonempty(
 
 
 # ==========================================================
-# HANDLING UNIT VALIDATION
+# SALES ORDER VALIDATION
+# ==========================================================
+
+def _validate_sales_order(
+    value
+) -> Optional[str]:
+    """
+    Accept only true ULP Sales Orders.
+
+    Accept:
+        SO-00325433
+
+    Reject:
+        SO 322733
+        ORG SO 322733
+        322733
+    """
+
+    value = _clean_string(
+        value
+    )
+
+    if not value:
+        return None
+
+    value = value.upper()
+
+    if not SALES_ORDER_PATTERN.fullmatch(
+        value
+    ):
+        return None
+
+    return value
+
+
+# ==========================================================
+# HANDLING UNIT HELPERS
 # ==========================================================
 
 def _count_dimensions(
@@ -631,7 +718,9 @@ def _count_dimensions(
             "width",
             "height",
         ]
-        if hu.get(field) is not None
+        if hu.get(
+            field
+        ) is not None
     )
 
 
@@ -648,7 +737,9 @@ def _append_note(
 
     if existing:
 
-        hu["notes"] = (
+        hu[
+            "notes"
+        ] = (
             existing
             + " "
             + note
@@ -656,18 +747,19 @@ def _append_note(
 
     else:
 
-        hu["notes"] = note
+        hu[
+            "notes"
+        ] = note
 
 
 def _repair_handling_unit(
     hu: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Deterministic plausibility checks.
+    Conservative freight plausibility rules.
 
-    We do NOT creatively reinterpret handwriting.
-
-    We only repair extremely implausible role assignments.
+    GPT reads the handwriting.
+    Python prevents clearly bad number-role assignments.
     """
 
     length = hu.get(
@@ -686,15 +778,19 @@ def _repair_handling_unit(
         "weight"
     )
 
+    uncertain = bool(
+        hu.get(
+            "uncertain"
+        )
+    )
+
     # ------------------------------------------------------
-    # Example:
+    # CASE 1
     #
-    # GPT:
     # 48 x 44 x 756
     # weight = null
     #
-    # A 756" pallet height is not credible here.
-    # Treat 756 as the likely weight instead.
+    # Treat 756 as likely weight.
     # ------------------------------------------------------
 
     if (
@@ -721,14 +817,77 @@ def _repair_handling_unit(
             hu,
             (
                 f"Automatic plausibility correction: "
-                f"{height} was extracted as height but is "
-                f"more plausible as weight; height left blank."
+                f"{height} was extracted as height but "
+                f"is much more plausible as weight. "
+                f"Height requires review."
+            )
+        )
+
+    # Refresh values.
+    length = hu.get(
+        "length"
+    )
+
+    width = hu.get(
+        "width"
+    )
+
+    height = hu.get(
+        "height"
+    )
+
+    weight = hu.get(
+        "weight"
+    )
+
+    # ------------------------------------------------------
+    # CASE 2
+    #
+    # Possible split of one handwritten number:
+    #
+    # height = 75
+    # weight = 6
+    #
+    # when model itself says uncertain.
+    # ------------------------------------------------------
+
+    if (
+        uncertain
+        and height is not None
+        and 60 <= height <= 120
+        and weight is not None
+        and 0 < weight <= 10
+        and length is not None
+        and width is not None
+    ):
+
+        bad_height = height
+        bad_weight = weight
+
+        hu[
+            "height"
+        ] = None
+
+        hu[
+            "weight"
+        ] = None
+
+        hu[
+            "uncertain"
+        ] = True
+
+        _append_note(
+            hu,
+            (
+                f"Possible handwritten number split: "
+                f"height={bad_height} and weight={bad_weight} "
+                f"were not trusted. Verify the original notation."
             )
         )
 
     # ------------------------------------------------------
-    # Impossible/extreme dimensions.
-    # Do not delete — flag for review.
+    # CASE 3
+    # Extreme dimensions.
     # ------------------------------------------------------
 
     for field in [
@@ -753,16 +912,14 @@ def _repair_handling_unit(
             _append_note(
                 hu,
                 (
-                    f"{field} value {value} is outside "
+                    f"{field}={value} is outside the "
                     f"normal ULP handling-unit range."
                 )
             )
 
     # ------------------------------------------------------
-    # Tall / unusual height.
-    #
-    # Values such as 91 are possible, so we DO NOT alter
-    # them. We only ensure they receive review attention.
+    # CASE 4
+    # Unusually tall freight.
     # ------------------------------------------------------
 
     height = hu.get(
@@ -781,17 +938,58 @@ def _repair_handling_unit(
         _append_note(
             hu,
             (
-                f"Height {height} is unusually tall; "
-                f"verify handwritten orientation."
+                f"Height {height} is unusually tall. "
+                f"Verify handwritten orientation."
             )
         )
 
     return hu
 
 
+def _partial_dimensions_are_plausible(
+    hu: Dict[str, Any]
+) -> bool:
+
+    length = hu.get(
+        "length"
+    )
+
+    width = hu.get(
+        "width"
+    )
+
+    if (
+        length is None
+        or width is None
+    ):
+        return False
+
+    length_ok = (
+        length in PREFERRED_LENGTHS
+        or (
+            40 <= length <= 160
+        )
+    )
+
+    width_ok = (
+        MIN_TYPICAL_WIDTH
+        <= width
+        <= MAX_TYPICAL_WIDTH
+    )
+
+    return (
+        length_ok
+        and width_ok
+    )
+
+
 def _handling_unit_has_real_data(
     hu: Dict[str, Any]
 ) -> bool:
+    """
+    Preserve strong or plausibly incomplete handling units.
+    Reject random handwriting.
+    """
 
     dimension_count = (
         _count_dimensions(
@@ -813,18 +1011,30 @@ def _handling_unit_has_real_data(
         )
     )
 
+    # Full dimensional notation.
     if dimension_count >= 3:
         return True
 
+    # Two dims + weight = strong evidence.
     if (
         dimension_count >= 2
-        and (
-            has_weight
-            or has_location
+        and has_weight
+    ):
+        return True
+
+    # Two dims + location:
+    # keep only if L/W pair is plausible.
+    if (
+        dimension_count >= 2
+        and has_location
+        and _partial_dimensions_are_plausible(
+            hu
         )
     ):
         return True
 
+    # One dimension + weight + location
+    # still deserves review.
     if (
         dimension_count >= 1
         and has_weight
@@ -843,18 +1053,23 @@ def _handling_unit_key(
         hu.get(
             "page"
         ),
+
         hu.get(
             "length"
         ),
+
         hu.get(
             "width"
         ),
+
         hu.get(
             "height"
         ),
+
         hu.get(
             "weight"
         ),
+
         _normalize_compare_string(
             hu.get(
                 "location"
@@ -914,6 +1129,7 @@ def _extract_page_with_gpt(
                                 "text":
                                     EXTRACTION_INSTRUCTIONS,
                             },
+
                             {
                                 "type":
                                     "input_file",
@@ -974,12 +1190,28 @@ def _extract_page_with_gpt(
             or {}
         )
 
-        # Python owns page numbering.
+        # --------------------------------------------------
+        # STRICT SALES ORDER VALIDATION
+        # --------------------------------------------------
+
+        page_result[
+            "sales_order"
+        ] = _validate_sales_order(
+            page_result.get(
+                "sales_order"
+            )
+        )
+
+        # Python owns exact page numbering.
         page_result[
             "page"
         ] = (
             original_page_number
         )
+
+        # --------------------------------------------------
+        # CLEAN / REPAIR HUs
+        # --------------------------------------------------
 
         cleaned_hus = []
 
@@ -1016,10 +1248,19 @@ def _extract_page_with_gpt(
             "handling_units"
         ] = cleaned_hus
 
+        # --------------------------------------------------
+        # USAGE
+        # --------------------------------------------------
+
         usage = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
+            "input_tokens":
+                0,
+
+            "output_tokens":
+                0,
+
+            "total_tokens":
+                0,
         }
 
         if response.usage:
@@ -1077,44 +1318,72 @@ def _page_similarity_score(
     score = 0
 
     if _field_matches(
-        a.get("customer_PO"),
-        b.get("customer_PO"),
+        a.get(
+            "customer_PO"
+        ),
+        b.get(
+            "customer_PO"
+        ),
     ):
         score += 12
 
     if _field_matches(
-        a.get("delivery_zip"),
-        b.get("delivery_zip"),
+        a.get(
+            "delivery_zip"
+        ),
+        b.get(
+            "delivery_zip"
+        ),
     ):
         score += 6
 
     if _field_matches(
-        a.get("delivery_name"),
-        b.get("delivery_name"),
+        a.get(
+            "delivery_name"
+        ),
+        b.get(
+            "delivery_name"
+        ),
     ):
         score += 5
 
     if _field_matches(
-        a.get("delivery_address"),
-        b.get("delivery_address"),
+        a.get(
+            "delivery_address"
+        ),
+        b.get(
+            "delivery_address"
+        ),
     ):
         score += 5
 
     if _field_matches(
-        a.get("delivery_city"),
-        b.get("delivery_city"),
+        a.get(
+            "delivery_city"
+        ),
+        b.get(
+            "delivery_city"
+        ),
     ):
         score += 2
 
     if _field_matches(
-        a.get("delivery_state"),
-        b.get("delivery_state"),
+        a.get(
+            "delivery_state"
+        ),
+        b.get(
+            "delivery_state"
+        ),
     ):
         score += 1
 
     if _field_matches(
-        a.get("delivery_contact"),
-        b.get("delivery_contact"),
+        a.get(
+            "delivery_contact"
+        ),
+        b.get(
+            "delivery_contact"
+        ),
     ):
         score += 2
 
@@ -1204,7 +1473,7 @@ def _merge_page_into_group(
         )
 
     page_so = (
-        _clean_string(
+        _validate_sales_order(
             page.get(
                 "sales_order"
             )
@@ -1272,7 +1541,7 @@ def _merge_page_into_group(
 
 
 # ==========================================================
-# FIRST-PASS GROUPING
+# FIRST PASS GROUPING
 # ==========================================================
 
 def _should_start_new_group(
@@ -1289,7 +1558,7 @@ def _should_start_new_group(
         return False
 
     current_so = (
-        _clean_string(
+        _validate_sales_order(
             current_page.get(
                 "sales_order"
             )
@@ -1297,19 +1566,23 @@ def _should_start_new_group(
     )
 
     group_so = (
-        _clean_string(
+        _validate_sales_order(
             current_group.get(
                 "sales_order"
             )
         )
     )
 
-    # Different explicit SO = hard boundary.
+    # ----------------------------------
+    # Hard boundary:
+    # two different valid SOs.
+    # ----------------------------------
+
     if (
         current_so
         and group_so
-        and current_so.upper()
-        != group_so.upper()
+        and current_so
+        != group_so
     ):
 
         return True
@@ -1324,23 +1597,21 @@ def _should_start_new_group(
         )
     )
 
-    # Strong identity match = continuation.
+    # Strong same-shipment identity.
     if similarity >= 8:
         return False
 
-    # Current page has explicit SO,
-    # prior group doesn't.
+    # Current page introduces a valid Sales Order
+    # but prior group has none.
     #
-    # Don't immediately glue it here.
-    # Start a new group and let the
-    # backward-stitch pass decide safely.
+    # Start new temporarily.
+    # Backward stitching can attach it safely.
     if (
         current_so
         and not group_so
     ):
         return True
 
-    # Does page contain recognizable shipment identity?
     has_identity = any(
         _clean_string(
             current_page.get(
@@ -1355,16 +1626,18 @@ def _should_start_new_group(
         ]
     )
 
-    # No shipment identity = probably continuation form.
+    # No recognizable shipment identity:
+    # probably a continuation form.
     if not has_identity:
         return False
 
-    # Recognizable different identity = boundary.
+    # Recognizable but nonmatching identity:
+    # likely new shipment.
     return True
 
 
 # ==========================================================
-# BACKWARD SO STITCHING
+# BACKWARD SALES ORDER STITCHING
 # ==========================================================
 
 def _group_has_identity(
@@ -1389,24 +1662,8 @@ def _group_has_identity(
 def _group_is_so_only_or_packing_list(
     group: Dict[str, Any]
 ) -> bool:
-    """
-    Typical pattern:
 
-    preceding group:
-        pages 1-2
-        PO/address/consignee
-        no SO
-
-    next group:
-        page 3
-        explicit SO
-        pallet notation
-        little/no shipment identity
-
-    That's exactly what we want to stitch backward.
-    """
-
-    if not _clean_string(
+    if not _validate_sales_order(
         group.get(
             "sales_order"
         )
@@ -1428,7 +1685,9 @@ def _group_is_so_only_or_packing_list(
         )
     )
 
-    return identity_count <= 1
+    return (
+        identity_count <= 1
+    )
 
 
 def _groups_are_adjacent(
@@ -1448,12 +1707,16 @@ def _groups_are_adjacent(
 
     return (
         max(
-            left["pages"]
+            left[
+                "pages"
+            ]
         )
         + 1
         ==
         min(
-            right["pages"]
+            right[
+                "pages"
+            ]
         )
     )
 
@@ -1481,7 +1744,7 @@ def _merge_group_into_group(
             )
 
     source_so = (
-        _clean_string(
+        _validate_sales_order(
             source.get(
                 "sales_order"
             )
@@ -1555,27 +1818,29 @@ def _backward_stitch_sales_orders(
 ) -> List[
     Dict[str, Any]
 ]:
-    """
-    Attach an SO-only packing-list group to the immediately
-    preceding unidentified shipment group.
 
-    We deliberately require adjacency.
-    """
-
-    if len(groups) < 2:
+    if len(
+        groups
+    ) < 2:
         return groups
 
     stitched = []
 
     i = 0
 
-    while i < len(groups):
+    while i < len(
+        groups
+    ):
 
-        current = groups[i]
+        current = groups[
+            i
+        ]
 
         if (
-            i + 1 <
-            len(groups)
+            i + 1
+            < len(
+                groups
+            )
         ):
 
             nxt = groups[
@@ -1583,7 +1848,7 @@ def _backward_stitch_sales_orders(
             ]
 
             should_stitch = (
-                not _clean_string(
+                not _validate_sales_order(
                     current.get(
                         "sales_order"
                     )
@@ -1624,7 +1889,7 @@ def _backward_stitch_sales_orders(
 
 
 # ==========================================================
-# GROUP PAGES
+# GROUP PAGES INTO SHIPMENTS
 # ==========================================================
 
 def _group_pages_into_shipments(
@@ -1678,21 +1943,15 @@ def _group_pages_into_shipments(
             current_group
         )
 
-    # ------------------------------------------------------
-    # Second deterministic pass:
-    # attach SO-only packing lists backward.
-    # ------------------------------------------------------
-
+    # Attach valid SO-only packing list
+    # backward to prior unidentified shipment.
     groups = (
         _backward_stitch_sales_orders(
             groups
         )
     )
 
-    # ------------------------------------------------------
-    # Final cleanup.
-    # ------------------------------------------------------
-
+    # Final sorting.
     for group in groups:
 
         group[
@@ -1768,7 +2027,7 @@ def extract_ulp_with_gpt(
     }
 
     # ======================================================
-    # EXACTLY ONE PAGE PER GPT REQUEST
+    # ONE PAGE PER GPT REQUEST
     # ======================================================
 
     for page_index in range(
@@ -1848,7 +2107,7 @@ def extract_ulp_with_gpt(
         })
 
     # ======================================================
-    # PYTHON ASSEMBLES THE SHIPMENTS
+    # PYTHON ASSEMBLES SHIPMENTS
     # ======================================================
 
     grouped_shipments = (
