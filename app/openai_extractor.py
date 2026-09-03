@@ -201,43 +201,59 @@ If something is not visible on THIS PAGE, return null.
 
 
 ============================================================
-SALES ORDER — IMPORTANT
+SALES ORDER — CRITICAL
 ============================================================
 
-Actively search the ENTIRE PAGE for a Sales Order number.
+You must actively search the ENTIRE PAGE for the Sales Order.
 
-Valid ULP Sales Orders normally look exactly like:
+Valid ULP Sales Orders look exactly like:
 
 SO-00325355
 
-In other words:
+Format:
 
 SO-
 followed by exactly 8 digits.
 
-They may appear:
 
-- near the top or upper-right
-- on a yellow PACKING LIST
-- beside or underneath the words "Sales Order"
-- in smaller printed text than the main shipment information
+============================================================
+BARCODE RULE — CRITICAL
+============================================================
 
-Before returning sales_order=null, make one final visual search of
-the entire page specifically for a valid value beginning with "SO-".
+On the top ULP Pink sheet, the barcode corresponds to the Sales Order
+number.
 
-Do NOT return values such as:
+The barcode value is authoritative for identifying the Sales Order.
+
+When extracting sales_order, use this order of preference:
+
+1. Read the printed "Sales order" field if clearly visible.
+2. Also inspect the barcode and any human-readable value associated
+   with the barcode.
+3. If the printed field is unclear or missed, use the barcode value
+   if it resolves to a valid SO-######## Sales Order.
+4. If both are visible and agree, return that Sales Order.
+5. If neither produces a valid SO-######## value, return null.
+
+Do NOT return unrelated references containing "SO".
+
+For example, do NOT treat these as Sales Orders:
 
 SO 322733
 ORG SO 322733
 322733
 
-Those may be notes or references, not the true Sales Order.
+Those may be notes or prior-order references.
 
-Only return a Sales Order when it is actually visible and matches the
-ULP Sales Order format.
+Before returning sales_order=null, perform one final visual scan of:
 
-Never guess a Sales Order from a customer PO, customer reference,
-packing-list number, consignee, or other field.
+- the printed Sales order field
+- the top header area
+- the barcode area
+- any human-readable text associated with the barcode
+
+Never guess a Sales Order from customer PO, consignee, packing-list
+number, or another reference.
 
 
 ============================================================
@@ -540,14 +556,15 @@ FINAL PAGE CHECK
 
 Before responding:
 
-1. Re-scan the entire page specifically for a valid Sales Order
-   formatted SO-########.
-2. Re-scan the entire page for handwritten pallet notation.
-3. Count the genuine handling units.
-4. Verify every genuine handling unit was returned.
-5. Verify weights were not mistaken for dimensions.
-6. Verify product-table dimensions were ignored.
-7. Verify miscellaneous handwriting was not converted into a pallet.
+1. Re-scan the printed Sales order field.
+2. Re-scan the barcode area for the Sales Order.
+3. Confirm sales_order matches SO-######## or return null.
+4. Re-scan the entire page for handwritten pallet notation.
+5. Count the genuine handling units.
+6. Verify every genuine handling unit was returned.
+7. Verify weights were not mistaken for dimensions.
+8. Verify printed product dimensions were ignored.
+9. Verify miscellaneous handwriting was not converted into a pallet.
 """
 
 
@@ -674,17 +691,6 @@ def _first_nonempty(
 def _validate_sales_order(
     value
 ) -> Optional[str]:
-    """
-    Accept only true ULP Sales Orders.
-
-    Accept:
-        SO-00325433
-
-    Reject:
-        SO 322733
-        ORG SO 322733
-        322733
-    """
 
     value = _clean_string(
         value
@@ -755,12 +761,6 @@ def _append_note(
 def _repair_handling_unit(
     hu: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """
-    Conservative freight plausibility rules.
-
-    GPT reads the handwriting.
-    Python prevents clearly bad number-role assignments.
-    """
 
     length = hu.get(
         "length"
@@ -784,15 +784,7 @@ def _repair_handling_unit(
         )
     )
 
-    # ------------------------------------------------------
-    # CASE 1
-    #
-    # 48 x 44 x 756
-    # weight = null
-    #
-    # Treat 756 as likely weight.
-    # ------------------------------------------------------
-
+    # 48 x 44 x 756 -> likely 756 lb.
     if (
         height is not None
         and height >= 240
@@ -823,7 +815,6 @@ def _repair_handling_unit(
             )
         )
 
-    # Refresh values.
     length = hu.get(
         "length"
     )
@@ -840,17 +831,7 @@ def _repair_handling_unit(
         "weight"
     )
 
-    # ------------------------------------------------------
-    # CASE 2
-    #
-    # Possible split of one handwritten number:
-    #
-    # height = 75
-    # weight = 6
-    #
-    # when model itself says uncertain.
-    # ------------------------------------------------------
-
+    # Possible 756 -> 75 + 6 split.
     if (
         uncertain
         and height is not None
@@ -881,14 +862,9 @@ def _repair_handling_unit(
             (
                 f"Possible handwritten number split: "
                 f"height={bad_height} and weight={bad_weight} "
-                f"were not trusted. Verify the original notation."
+                f"were not trusted. Verify original notation."
             )
         )
-
-    # ------------------------------------------------------
-    # CASE 3
-    # Extreme dimensions.
-    # ------------------------------------------------------
 
     for field in [
         "length",
@@ -916,11 +892,6 @@ def _repair_handling_unit(
                     f"normal ULP handling-unit range."
                 )
             )
-
-    # ------------------------------------------------------
-    # CASE 4
-    # Unusually tall freight.
-    # ------------------------------------------------------
 
     height = hu.get(
         "height"
@@ -986,10 +957,6 @@ def _partial_dimensions_are_plausible(
 def _handling_unit_has_real_data(
     hu: Dict[str, Any]
 ) -> bool:
-    """
-    Preserve strong or plausibly incomplete handling units.
-    Reject random handwriting.
-    """
 
     dimension_count = (
         _count_dimensions(
@@ -1011,19 +978,15 @@ def _handling_unit_has_real_data(
         )
     )
 
-    # Full dimensional notation.
     if dimension_count >= 3:
         return True
 
-    # Two dims + weight = strong evidence.
     if (
         dimension_count >= 2
         and has_weight
     ):
         return True
 
-    # Two dims + location:
-    # keep only if L/W pair is plausible.
     if (
         dimension_count >= 2
         and has_location
@@ -1033,8 +996,6 @@ def _handling_unit_has_real_data(
     ):
         return True
 
-    # One dimension + weight + location
-    # still deserves review.
     if (
         dimension_count >= 1
         and has_weight
@@ -1190,10 +1151,7 @@ def _extract_page_with_gpt(
             or {}
         )
 
-        # --------------------------------------------------
-        # STRICT SALES ORDER VALIDATION
-        # --------------------------------------------------
-
+        # Strict Sales Order validation.
         page_result[
             "sales_order"
         ] = _validate_sales_order(
@@ -1202,16 +1160,12 @@ def _extract_page_with_gpt(
             )
         )
 
-        # Python owns exact page numbering.
+        # Python owns page numbering.
         page_result[
             "page"
         ] = (
             original_page_number
         )
-
-        # --------------------------------------------------
-        # CLEAN / REPAIR HUs
-        # --------------------------------------------------
 
         cleaned_hus = []
 
@@ -1247,10 +1201,6 @@ def _extract_page_with_gpt(
         page_result[
             "handling_units"
         ] = cleaned_hus
-
-        # --------------------------------------------------
-        # USAGE
-        # --------------------------------------------------
 
         usage = {
             "input_tokens":
@@ -1573,11 +1523,6 @@ def _should_start_new_group(
         )
     )
 
-    # ----------------------------------
-    # Hard boundary:
-    # two different valid SOs.
-    # ----------------------------------
-
     if (
         current_so
         and group_so
@@ -1597,15 +1542,9 @@ def _should_start_new_group(
         )
     )
 
-    # Strong same-shipment identity.
     if similarity >= 8:
         return False
 
-    # Current page introduces a valid Sales Order
-    # but prior group has none.
-    #
-    # Start new temporarily.
-    # Backward stitching can attach it safely.
     if (
         current_so
         and not group_so
@@ -1626,13 +1565,9 @@ def _should_start_new_group(
         ]
     )
 
-    # No recognizable shipment identity:
-    # probably a continuation form.
     if not has_identity:
         return False
 
-    # Recognizable but nonmatching identity:
-    # likely new shipment.
     return True
 
 
@@ -1943,15 +1878,12 @@ def _group_pages_into_shipments(
             current_group
         )
 
-    # Attach valid SO-only packing list
-    # backward to prior unidentified shipment.
     groups = (
         _backward_stitch_sales_orders(
             groups
         )
     )
 
-    # Final sorting.
     for group in groups:
 
         group[
