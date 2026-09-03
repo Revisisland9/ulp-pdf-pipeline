@@ -1,7 +1,10 @@
 from typing import Any, Dict, List, Optional
 
 
-# Exact Google Sheet headers, left to right.
+# ==========================================================
+# EXACT GOOGLE SHEET HEADERS
+# ==========================================================
+
 SHEET_HEADERS = [
     "Sales Order",
     "THR",
@@ -51,22 +54,47 @@ YELLOW_THRESHOLD = 0.80
 RED_THRESHOLD = 0.60
 
 
+# ==========================================================
+# BASIC HELPERS
+# ==========================================================
+
+def _clean_value(
+    value: Any,
+):
+    """
+    Convert None to blank while preserving useful numeric/string
+    values for the Sheet.
+    """
+
+    if value is None:
+        return ""
+
+    return value
+
+
 def _highlight_for_confidence(
     confidence: Optional[float],
 ) -> Optional[str]:
     """
-    Return:
-      None     = no highlight
-      yellow   = confidence < 80% and >= 60%
-      red      = confidence < 60%
+    Existing confidence rules:
+
+        >= 80%       no highlight
+        60% - <80%   yellow
+        <60%         red
     """
 
     if confidence is None:
         return None
 
     try:
-        confidence = float(confidence)
-    except (TypeError, ValueError):
+        confidence = float(
+            confidence
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
         return "red"
 
     if confidence < RED_THRESHOLD:
@@ -78,42 +106,86 @@ def _highlight_for_confidence(
     return None
 
 
+# ==========================================================
+# BACKWARD-COMPATIBLE FIELD HELPERS
+# ==========================================================
+
 def _field_value(
-    field: Optional[Dict[str, Any]],
+    field: Any,
 ):
     """
-    Shipment-level normalized fields look like:
+    Support BOTH structures.
 
-    {
-        "value": "...",
-        "confidence": 0.99,
-        "page": 1
-    }
+    Old Document AI normalized field:
+
+        {
+            "value": "GILBERT",
+            "confidence": 0.97,
+            "page": 9
+        }
+
+    New hybrid field:
+
+        "GILBERT"
+
+    This lets the mapper remain backward-compatible.
     """
 
-    if not field:
+    if field is None:
         return None
 
-    return field.get("value")
+    if isinstance(
+        field,
+        dict,
+    ):
+
+        return field.get(
+            "value"
+        )
+
+    return field
 
 
 def _field_confidence(
-    field: Optional[Dict[str, Any]],
+    field: Any,
 ) -> Optional[float]:
+    """
+    Old Document AI normalized fields may contain confidence.
 
-    if not field:
+    Hybrid GPT/Google fields currently do not have numeric
+    confidence values, so they return None here.
+    """
+
+    if not isinstance(
+        field,
+        dict,
+    ):
         return None
 
-    confidence = field.get("confidence")
+    confidence = field.get(
+        "confidence"
+    )
 
     if confidence is None:
         return None
 
     try:
-        return float(confidence)
-    except (TypeError, ValueError):
+
+        return float(
+            confidence
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
         return None
 
+
+# ==========================================================
+# COUNTRY
+# ==========================================================
 
 def _country_from_zip(
     zip_value: Any,
@@ -121,14 +193,19 @@ def _country_from_zip(
     """
     Business rule:
 
-    Numeric-leading ZIP/postal code -> USA
-    Letter-leading postal code      -> CANADA
+    ZIP/postal starts with number -> USA
+    ZIP/postal starts with letter -> CANADA
     """
 
-    if zip_value in (None, ""):
+    if zip_value in (
+        None,
+        "",
+    ):
         return None
 
-    text = str(zip_value).strip()
+    text = str(
+        zip_value
+    ).strip()
 
     if not text:
         return None
@@ -144,10 +221,11 @@ def _country_from_zip(
     return None
 
 
+# ==========================================================
+# BLANK ROW / HIGHLIGHTS
+# ==========================================================
+
 def _make_blank_row() -> Dict[str, Any]:
-    """
-    Create one completely blank row using the exact Sheet headers.
-    """
 
     return {
         header: ""
@@ -155,22 +233,18 @@ def _make_blank_row() -> Dict[str, Any]:
     }
 
 
-def _make_blank_highlights() -> Dict[str, Optional[str]]:
-    """
-    Parallel formatting map.
-
-    Example:
-    {
-        "L": "yellow",
-        "Location": "red"
-    }
-    """
+def _make_blank_highlights(
+) -> Dict[str, Optional[str]]:
 
     return {
         header: None
         for header in SHEET_HEADERS
     }
 
+
+# ==========================================================
+# CELL WRITER
+# ==========================================================
 
 def _set_field(
     row: Dict[str, Any],
@@ -179,30 +253,61 @@ def _set_field(
     value: Any,
     confidence: Optional[float] = None,
     required: bool = False,
+    force_highlight: Optional[str] = None,
 ):
     """
-    Write a value and determine the cell highlight.
+    Write one Sheet field.
 
-    Required + missing -> red.
-    Otherwise confidence thresholds apply.
+    Priority:
+
+    1. Required + missing -> red
+    2. Explicit force_highlight
+    3. Numeric confidence thresholds
     """
 
-    if value is None:
-        value = ""
+    value = _clean_value(
+        value
+    )
 
-    row[column] = value
+    row[
+        column
+    ] = value
 
-    if required and value == "":
-        highlights[column] = "red"
+    if (
+        required
+        and value == ""
+    ):
+
+        highlights[
+            column
+        ] = "red"
+
         return
 
-    highlight = _highlight_for_confidence(
-        confidence
+    if force_highlight:
+
+        highlights[
+            column
+        ] = force_highlight
+
+        return
+
+    highlight = (
+        _highlight_for_confidence(
+            confidence
+        )
     )
 
     if highlight:
-        highlights[column] = highlight
 
+        highlights[
+            column
+        ] = highlight
+
+
+# ==========================================================
+# SHIPMENT-LEVEL FIELDS
+# ==========================================================
 
 def _add_shipment_fields(
     row: Dict[str, Any],
@@ -210,42 +315,91 @@ def _add_shipment_fields(
     order: Dict[str, Any],
 ):
     """
-    Add Sales Order and address/contact data.
+    Add shipment-level data.
 
-    This is only called for the FIRST row of each Sales Order.
+    Called ONLY on the first row of a Sales Order.
+
+    Hybrid output is normally:
+
+        sales_order: "SO-00325428"
+        customer_PO: "P-26.172JR-01"
+        SRP_number: "SO0316672"
+        delivery_name: "..."
+        ...
+
+    Old normalized Document AI dictionaries remain supported.
     """
 
-    sales_order = order.get(
-        "sales_order",
-        "",
+    sales_order_source = (
+        order.get(
+            "sales_order"
+        )
     )
 
-    sales_order_confidence = order.get(
-        "sales_order_confidence"
+    sales_order = _field_value(
+        sales_order_source
     )
+
+    sales_order_confidence = (
+        order.get(
+            "sales_order_confidence"
+        )
+    )
+
+    if (
+        sales_order_confidence
+        is None
+    ):
+
+        sales_order_confidence = (
+            _field_confidence(
+                sales_order_source
+            )
+        )
 
     _set_field(
         row,
         highlights,
         "Sales Order",
         sales_order,
-        sales_order_confidence,
+        confidence=sales_order_confidence,
         required=True,
     )
 
     field_map = {
-        "delivery_name": "Delivery name",
-        "delivery_address": "DEST_ADDRESS1_CLEAN",
-        "delivery_address2": "DEST_ADDRESS2_CLEAN",
-        "delivery_city": "City",
-        "delivery_state": "State",
-        "delivery_zip": "ZIP/postal code",
-        "delivery_contact": "Delivery contact",
-        "customer_PO": "Customer reference",
-        "SRP_number": "SRP Number",
+
+        "delivery_name":
+            "Delivery name",
+
+        "delivery_address":
+            "DEST_ADDRESS1_CLEAN",
+
+        "delivery_address2":
+            "DEST_ADDRESS2_CLEAN",
+
+        "delivery_city":
+            "City",
+
+        "delivery_state":
+            "State",
+
+        "delivery_zip":
+            "ZIP/postal code",
+
+        "delivery_contact":
+            "Delivery contact",
+
+        "customer_PO":
+            "Customer reference",
+
+        "SRP_number":
+            "SRP Number",
     }
 
-    for source_field, sheet_column in field_map.items():
+    for (
+        source_field,
+        sheet_column,
+    ) in field_map.items():
 
         source = order.get(
             source_field
@@ -255,8 +409,10 @@ def _add_shipment_fields(
             source
         )
 
-        confidence = _field_confidence(
-            source
+        confidence = (
+            _field_confidence(
+                source
+            )
         )
 
         _set_field(
@@ -264,9 +420,13 @@ def _add_shipment_fields(
             highlights,
             sheet_column,
             value,
-            confidence,
+            confidence=confidence,
             required=False,
         )
+
+    # ------------------------------------------------------
+    # COUNTRY
+    # ------------------------------------------------------
 
     zip_value = row.get(
         "ZIP/postal code",
@@ -287,15 +447,38 @@ def _add_shipment_fields(
     )
 
 
+# ==========================================================
+# HANDLING UNIT
+# ==========================================================
+
 def _add_handling_unit(
     row: Dict[str, Any],
     highlights: Dict[str, Optional[str]],
     handling_unit: Dict[str, Any],
 ):
     """
-    Add handling-unit values.
+    Write one handling unit.
 
-    L, W, H, weight and Location are all required.
+    Required fields:
+
+        L
+        W
+        H
+        #
+        Location
+
+    Hybrid GPT behavior:
+
+        uncertain = false
+            -> normal cells
+
+        uncertain = true
+            -> populated HU cells yellow
+
+        missing required field
+            -> red
+
+    Missing always wins over uncertainty.
     """
 
     confidence = handling_unit.get(
@@ -303,78 +486,181 @@ def _add_handling_unit(
         {},
     )
 
+    if not isinstance(
+        confidence,
+        dict,
+    ):
+        confidence = {}
+
+    uncertain = bool(
+        handling_unit.get(
+            "uncertain",
+            False,
+        )
+    )
+
     mapping = {
-        "length": "L",
-        "width": "W",
-        "height": "H",
-        "weight": "#",
-        "location": "Location",
+
+        "length":
+            "L",
+
+        "width":
+            "W",
+
+        "height":
+            "H",
+
+        "weight":
+            "#",
+
+        "location":
+            "Location",
     }
 
-    for source_field, sheet_column in mapping.items():
+    for (
+        source_field,
+        sheet_column,
+    ) in mapping.items():
 
         value = handling_unit.get(
             source_field
         )
 
-        field_confidence = confidence.get(
-            source_field
+        field_confidence = (
+            confidence.get(
+                source_field
+            )
         )
+
+        # GPT doesn't currently provide numeric field
+        # confidence. If it explicitly marked the HU
+        # uncertain, flag populated cells yellow.
+        force_highlight = None
+
+        if (
+            uncertain
+            and value not in (
+                None,
+                "",
+            )
+        ):
+
+            force_highlight = (
+                "yellow"
+            )
 
         _set_field(
             row,
             highlights,
             sheet_column,
             value,
-            field_confidence,
+            confidence=field_confidence,
             required=True,
+            force_highlight=force_highlight,
         )
 
+
+# ==========================================================
+# MAIN SHEET MAPPER
+# ==========================================================
 
 def build_sheet_rows(
     normalized_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Convert normalized ULP Sales Orders into Sheet-ready rows.
+    Convert normalized/hybrid ULP Sales Orders into Sheet rows.
 
-    Rules:
+    RULES
 
-    - First handling-unit row gets Sales Order + address/contact data.
-    - Additional handling-unit rows contain only L/W/H/#/Location.
-    - All unrelated columns remain blank.
-    - Missing required handling-unit fields are red.
-    - Confidence:
-        >= 80%          no highlight
-        60% - <80%      yellow
-        <60%            red
-    - If a Sales Order has NO handling units:
-        create one shipment row and mark
-        L/W/H/#/Location red.
+    FIRST ROW OF SHIPMENT
+    ---------------------
+    Contains:
+
+        Sales Order
+        address/contact information
+        Customer Reference
+        SRP Number
+        first handling unit
+
+    ADDITIONAL HU ROWS
+    ------------------
+    Contain only:
+
+        L
+        W
+        H
+        #
+        Location
+
+    NO HANDLING UNITS
+    -----------------
+    Still create one shipment row.
+
+    L/W/H/#/Location will all be RED so the human operator
+    can review the shipment.
+
+    HIGHLIGHTING
+    ------------
+
+    Existing numeric confidence:
+
+        >=80%       normal
+        60-<80%     yellow
+        <60%        red
+
+    Hybrid GPT uncertainty:
+
+        uncertain=false
+            normal
+
+        uncertain=true
+            populated HU cells yellow
+
+        missing required HU value
+            red
     """
 
-    sales_orders = normalized_result.get(
-        "sales_orders",
-        [],
+    sales_orders = (
+        normalized_result.get(
+            "sales_orders",
+            []
+        )
+        or []
     )
 
-    output_rows: List[Dict[str, Any]] = []
+    output_rows: List[
+        Dict[str, Any]
+    ] = []
 
     for order in sales_orders:
 
-        handling_units = order.get(
-            "handling_units",
-            [],
+        if not isinstance(
+            order,
+            dict,
+        ):
+            continue
+
+        handling_units = (
+            order.get(
+                "handling_units",
+                []
+            )
+            or []
         )
 
-        #
-        # No handling units:
-        # preserve the Sales Order row but make the required
-        # handling-unit cells red.
-        #
+        # ==================================================
+        # NO HANDLING UNITS
+        # ==================================================
+
         if not handling_units:
 
-            row = _make_blank_row()
-            highlights = _make_blank_highlights()
+            row = (
+                _make_blank_row()
+            )
+
+            highlights = (
+                _make_blank_highlights()
+            )
 
             _add_shipment_fields(
                 row,
@@ -382,6 +668,7 @@ def build_sheet_rows(
                 order,
             )
 
+            # Human review required.
             for required_column in [
                 "L",
                 "W",
@@ -389,32 +676,47 @@ def build_sheet_rows(
                 "#",
                 "Location",
             ]:
+
                 highlights[
                     required_column
                 ] = "red"
 
             output_rows.append({
-                "values": row,
-                "highlights": highlights,
+                "values":
+                    row,
+
+                "highlights":
+                    highlights,
             })
 
             continue
 
-        #
-        # Normal case:
-        # one row per handling unit.
-        #
-        for index, handling_unit in enumerate(
+        # ==================================================
+        # ONE ROW PER HANDLING UNIT
+        # ==================================================
+
+        for (
+            index,
+            handling_unit,
+        ) in enumerate(
             handling_units
         ):
 
-            row = _make_blank_row()
-            highlights = _make_blank_highlights()
+            if not isinstance(
+                handling_unit,
+                dict,
+            ):
+                continue
 
-            #
-            # Only the first handling-unit row gets
-            # Sales Order/address/contact data.
-            #
+            row = (
+                _make_blank_row()
+            )
+
+            highlights = (
+                _make_blank_highlights()
+            )
+
+            # Only first HU row gets shipment/header data.
             if index == 0:
 
                 _add_shipment_fields(
@@ -430,12 +732,22 @@ def build_sheet_rows(
             )
 
             output_rows.append({
-                "values": row,
-                "highlights": highlights,
+                "values":
+                    row,
+
+                "highlights":
+                    highlights,
             })
 
     return {
-        "headers": SHEET_HEADERS,
-        "row_count": len(output_rows),
-        "rows": output_rows,
+        "headers":
+            SHEET_HEADERS,
+
+        "row_count":
+            len(
+                output_rows
+            ),
+
+        "rows":
+            output_rows,
     }
