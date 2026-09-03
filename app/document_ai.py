@@ -5,19 +5,37 @@ from google.cloud import documentai
 from pypdf import PdfReader, PdfWriter
 
 
+# ==========================================================
+# GOOGLE DOCUMENT AI CONFIG
+# ==========================================================
+
 PROJECT_ID = "706802237280"
 LOCATION = "us"
-PROCESSOR_ID = "108af97110febd0f"
+
+# Existing PRODUCTION Custom Extractor.
+#
+# DO NOT CHANGE.
+CUSTOM_PROCESSOR_ID = "108af97110febd0f"
+
+# New Enterprise Document OCR processor.
+#
+# This will be used by the GPT hybrid test path.
+PINK_OCR_PROCESSOR_ID = "711477af4e3c321d"
 
 
 # Stay comfortably below Document AI's 15-page
 # synchronous processing limit.
 CHUNK_SIZE = 12
 
-# Overlap adjacent chunks so Sales Orders near a
-# boundary have pages processed in both chunks.
+# Overlap adjacent chunks for the existing Custom Extractor
+# so Sales Orders/entities near boundaries can be processed
+# in both chunks.
 OVERLAP_PAGES = 2
 
+
+# ==========================================================
+# CLIENT
+# ==========================================================
 
 def _get_client():
     """
@@ -32,17 +50,29 @@ def _get_client():
     )
 
 
-def _processor_name(client):
+# ==========================================================
+# PROCESSOR RESOURCE NAMES
+# ==========================================================
+
+def _processor_name(
+    client,
+    processor_id: str,
+):
     """
-    Return the full Document AI processor resource name.
+    Return the full Document AI processor resource name
+    for the requested processor.
     """
 
     return client.processor_path(
         PROJECT_ID,
         LOCATION,
-        PROCESSOR_ID,
+        processor_id,
     )
 
+
+# ==========================================================
+# PDF HELPERS
+# ==========================================================
 
 def _pdf_page_count(
     pdf_bytes: bytes
@@ -74,6 +104,7 @@ def _make_pdf_chunk(
     is exclusive.
 
     Example:
+
         start_page = 0
         end_page   = 12
 
@@ -90,6 +121,7 @@ def _make_pdf_chunk(
         start_page,
         end_page,
     ):
+
         writer.add_page(
             reader.pages[
                 page_index
@@ -105,6 +137,10 @@ def _make_pdf_chunk(
     return output.getvalue()
 
 
+# ==========================================================
+# GENERIC DOCUMENT AI CALL
+# ==========================================================
+
 def _process_pdf_bytes(
     client,
     processor_name: str,
@@ -112,6 +148,11 @@ def _process_pdf_bytes(
 ):
     """
     Send one <=15-page PDF chunk to Document AI.
+
+    This works for both:
+
+    - Custom Extractor
+    - Enterprise OCR
     """
 
     raw_document = documentai.RawDocument(
@@ -129,13 +170,18 @@ def _process_pdf_bytes(
     )
 
 
+# ==========================================================
+# CUSTOM EXTRACTOR ENTITY HANDLING
+# ==========================================================
+
 def _entity_from_document_ai(
     entity,
     original_start_page: int,
 ) -> Dict[str, Any]:
     """
-    Convert a Document AI entity into our flat entity
-    format and restore its ORIGINAL PDF page number.
+    Convert a Custom Extractor Document AI entity into
+    our flat entity format and restore its ORIGINAL
+    PDF page number.
 
     Document AI page indexes are local to each chunk.
 
@@ -242,15 +288,13 @@ def _deduplicate_entities(
         )
 
         if new_confidence > old_confidence:
+
             best[key] = entity
 
     deduped = list(
         best.values()
     )
 
-    #
-    # Keep output in document order.
-    #
     deduped.sort(
         key=lambda e: (
             e.get("page")
@@ -270,13 +314,122 @@ def _deduplicate_entities(
     return deduped
 
 
+# ==========================================================
+# OCR TEXT HELPERS
+# ==========================================================
+
+def _text_from_anchor(
+    document,
+    text_anchor,
+) -> str:
+    """
+    Extract text represented by a Document AI text anchor.
+    """
+
+    if not text_anchor:
+        return ""
+
+    text_segments = (
+        text_anchor.text_segments
+        or []
+    )
+
+    parts = []
+
+    for segment in text_segments:
+
+        start_index = int(
+            segment.start_index
+            or 0
+        )
+
+        end_index = int(
+            segment.end_index
+            or 0
+        )
+
+        if end_index <= start_index:
+            continue
+
+        parts.append(
+            document.text[
+                start_index:end_index
+            ]
+        )
+
+    return "".join(
+        parts
+    ).strip()
+
+
+def _ocr_pages_from_document(
+    document,
+    original_start_page: int,
+) -> List[Dict[str, Any]]:
+    """
+    Convert Enterprise OCR output into page-level text.
+
+    Example result:
+
+    [
+        {
+            "page": 1,
+            "text": "..."
+        },
+        {
+            "page": 2,
+            "text": "..."
+        }
+    ]
+
+    This gives the hybrid GPT path deterministic printed OCR
+    organized by the ORIGINAL PDF page.
+    """
+
+    pages = []
+
+    for local_page_index, page in enumerate(
+        document.pages
+    ):
+
+        original_page_number = (
+            original_start_page
+            + local_page_index
+            + 1
+        )
+
+        page_text = _text_from_anchor(
+            document,
+            page.layout.text_anchor,
+        )
+
+        pages.append({
+            "page":
+                original_page_number,
+
+            "text":
+                page_text,
+        })
+
+    return pages
+
+
+# ==========================================================
+# EXISTING PRODUCTION CUSTOM EXTRACTOR
+# ==========================================================
+
 def extract_ulp_document(
     pdf_bytes: bytes
 ):
     """
-    Main ULP Document AI extraction function.
+    EXISTING PRODUCTION ULP Document AI extraction.
 
-    Behavior:
+    Uses:
+
+        Custom Extractor
+        108af97110febd0f
+
+    Behavior remains the same as before.
 
     1. Count PDF pages.
 
@@ -286,15 +439,6 @@ def extract_ulp_document(
     3. If > 12 pages:
        split internally into overlapping chunks.
 
-       Example 60-page PDF:
-
-           chunk 1 = pages 1-12
-           chunk 2 = pages 11-22
-           chunk 3 = pages 21-32
-           chunk 4 = pages 31-42
-           chunk 5 = pages 41-52
-           chunk 6 = pages 51-60
-
     4. Restore original PDF page numbers.
 
     5. Deduplicate entities created by overlap.
@@ -302,11 +446,11 @@ def extract_ulp_document(
     6. Return one combined entity list to the existing
        ULP normalizer.
 
-    The rest of the application does not need to know
-    that the PDF was split.
+    Production callers do not need to change.
     """
 
     if not pdf_bytes:
+
         raise ValueError(
             "PDF is empty."
         )
@@ -316,6 +460,7 @@ def extract_ulp_document(
     )
 
     if total_pages == 0:
+
         raise ValueError(
             "PDF contains no pages."
         )
@@ -323,18 +468,18 @@ def extract_ulp_document(
     client = _get_client()
 
     processor_name = _processor_name(
-        client
+        client,
+        CUSTOM_PROCESSOR_ID,
     )
 
     all_entities = []
 
     text_parts = []
 
-    #
+    # ======================================================
     # SMALL PDF
-    #
-    # No splitting necessary.
-    #
+    # ======================================================
+
     if total_pages <= CHUNK_SIZE:
 
         result = _process_pdf_bytes(
@@ -370,11 +515,10 @@ def extract_ulp_document(
                 1,
         }
 
-    #
+    # ======================================================
     # LARGE PDF
-    #
-    # Split into overlapping chunks.
-    #
+    # ======================================================
+
     step = (
         CHUNK_SIZE
         - OVERLAP_PAGES
@@ -409,9 +553,6 @@ def extract_ulp_document(
             result.document
         )
 
-        #
-        # Store OCR text mainly for debugging.
-        #
         text_parts.append(
             (
                 f"\n"
@@ -422,10 +563,6 @@ def extract_ulp_document(
             )
         )
 
-        #
-        # Restore every entity to the page number
-        # from the ORIGINAL 60-page PDF.
-        #
         for entity in document.entities:
 
             all_entities.append(
@@ -435,18 +572,11 @@ def extract_ulp_document(
                 )
             )
 
-        #
-        # Finished.
-        #
         if end_page >= total_pages:
             break
 
         start_page += step
 
-    #
-    # Because chunks overlap, pages 11-12, 21-22,
-    # etc. may have been extracted twice.
-    #
     all_entities = (
         _deduplicate_entities(
             all_entities
@@ -461,6 +591,201 @@ def extract_ulp_document(
 
         "entities":
             all_entities,
+
+        "page_count":
+            total_pages,
+
+        "chunk_count":
+            chunk_number,
+    }
+
+
+# ==========================================================
+# NEW ENTERPRISE OCR PATH
+# ==========================================================
+
+def extract_pink_ocr(
+    pdf_bytes: bytes
+):
+    """
+    NEW Enterprise OCR extraction for the GPT hybrid path.
+
+    Uses:
+
+        ULP PINK OCR
+        711477af4e3c321d
+
+    This does NOT use or alter the existing Custom Extractor.
+
+    Its job is to provide reliable PRINTED OCR text.
+
+    Output:
+
+    {
+        "text": "...",
+        "pages": [
+            {
+                "page": 1,
+                "text": "..."
+            },
+            ...
+        ],
+        "page_count": 15,
+        "chunk_count": 2
+    }
+
+    We intentionally do NOT expect Custom Extractor entities
+    from Enterprise OCR.
+
+    GPT/Python will later use this page-level printed text to
+    recover fields such as:
+
+        Sales order
+        Customer PO
+        SRP
+        delivery/contact information
+    """
+
+    if not pdf_bytes:
+
+        raise ValueError(
+            "PDF is empty."
+        )
+
+    total_pages = _pdf_page_count(
+        pdf_bytes
+    )
+
+    if total_pages == 0:
+
+        raise ValueError(
+            "PDF contains no pages."
+        )
+
+    client = _get_client()
+
+    processor_name = _processor_name(
+        client,
+        PINK_OCR_PROCESSOR_ID,
+    )
+
+    all_pages = []
+
+    text_parts = []
+
+    # ======================================================
+    # SMALL PDF
+    # ======================================================
+
+    if total_pages <= CHUNK_SIZE:
+
+        result = _process_pdf_bytes(
+            client,
+            processor_name,
+            pdf_bytes,
+        )
+
+        document = (
+            result.document
+        )
+
+        all_pages.extend(
+            _ocr_pages_from_document(
+                document,
+                original_start_page=0,
+            )
+        )
+
+        return {
+            "text":
+                document.text,
+
+            "pages":
+                all_pages,
+
+            "page_count":
+                total_pages,
+
+            "chunk_count":
+                1,
+        }
+
+    # ======================================================
+    # LARGE PDF
+    #
+    # Enterprise OCR does NOT need overlap because we are
+    # collecting ordinary page-level OCR rather than
+    # cross-page Custom Extractor entities.
+    # ======================================================
+
+    start_page = 0
+
+    chunk_number = 0
+
+    while start_page < total_pages:
+
+        end_page = min(
+            start_page + CHUNK_SIZE,
+            total_pages,
+        )
+
+        chunk_number += 1
+
+        chunk_pdf = _make_pdf_chunk(
+            pdf_bytes,
+            start_page,
+            end_page,
+        )
+
+        result = _process_pdf_bytes(
+            client,
+            processor_name,
+            chunk_pdf,
+        )
+
+        document = (
+            result.document
+        )
+
+        text_parts.append(
+            (
+                f"\n"
+                f"===== OCR CHUNK {chunk_number} "
+                f"ORIGINAL PAGES "
+                f"{start_page + 1}-{end_page} =====\n"
+                f"{document.text}"
+            )
+        )
+
+        all_pages.extend(
+            _ocr_pages_from_document(
+                document,
+                original_start_page=start_page,
+            )
+        )
+
+        if end_page >= total_pages:
+            break
+
+        # No overlap needed for basic OCR.
+        start_page = end_page
+
+    all_pages.sort(
+        key=lambda p:
+            p.get(
+                "page"
+            )
+            or 999999
+    )
+
+    return {
+        "text":
+            "\n".join(
+                text_parts
+            ),
+
+        "pages":
+            all_pages,
 
         "page_count":
             total_pages,
