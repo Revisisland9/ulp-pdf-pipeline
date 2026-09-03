@@ -4,10 +4,6 @@ import json
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
-import fitz
-import zxingcpp
-
-from PIL import Image, ImageOps
 from openai import OpenAI
 from pypdf import PdfReader, PdfWriter
 
@@ -20,20 +16,16 @@ CHUNK_SIZE = 1
 # BUSINESS RULES
 # ==========================================================
 
-# MASTER ULP SALES ORDER.
+# MASTER ULP SALES ORDER
 #
 # Examples:
 #   SO-00325428
 #   SO-00325352
 #
-# This is NOT the SRP number.
+# SRP numbers are separate and must NEVER be transformed
+# into this format.
 SALES_ORDER_PATTERN = re.compile(
     r"^SO-\d{8}$",
-    re.IGNORECASE,
-)
-
-SALES_ORDER_SEARCH_PATTERN = re.compile(
-    r"SO-\d{8}",
     re.IGNORECASE,
 )
 
@@ -64,7 +56,6 @@ def _get_client():
     )
 
     if not api_key:
-
         raise RuntimeError(
             "OPENAI_API_KEY is not configured."
         )
@@ -128,8 +119,8 @@ ULP_SCHEMA = {
 
                 "handling_units": {
                     "type": "array",
-                    "items": {
 
+                    "items": {
                         "type": "object",
 
                         "properties": {
@@ -210,7 +201,9 @@ ULP_SCHEMA = {
 
 EXTRACTION_INSTRUCTIONS = """
 You are extracting shipping information from exactly ONE scanned
-ULP "Pink" shipping document page.
+ULP shipping document page.
+
+These documents are often called "Pinks."
 
 Inspect the entire visual page carefully.
 
@@ -220,91 +213,153 @@ If a field is not visible on THIS PAGE, return null.
 
 
 ============================================================
-MASTER SALES ORDER — CRITICAL
+MASTER SALES ORDER — IMPORTANT
 ============================================================
 
-There are multiple identifiers on these documents.
+On the pink Pro Forma Ship List Report, there is a printed field
+in the upper-right information column labeled:
 
-They MUST NOT be confused.
+Sales order
 
-The MASTER ULP Sales Order has this exact format:
+Your job is to TRANSCRIBE the value printed beside the literal
+field label:
 
-SO-########
+Sales order
+
+Do NOT search the document for a number that merely resembles a
+Sales Order.
+
+Locate the actual printed field label:
+
+Sales order
+
+and read its corresponding printed value.
+
 
 Example:
 
-SO-00325428
-SO-00325352
+Sales order     SO-00325352
+
+returns:
+
+sales_order = "SO-00325352"
+
+
+Another example:
+
+Sales order     SO-00325428
+
+returns:
+
+sales_order = "SO-00325428"
+
+
+The Sales order field appears in the same general printed
+information block as fields such as:
+
+DLV Term
+Customer PO
+Customer Ref
+Site contact
+Contact phone
+Delivery contact
+Ship Date
+Ship Via
+
+Treat "Sales order" as a normal labeled printed form field.
+
+If you can read Customer PO, Contact phone, Delivery contact,
+or similar nearby printed fields, make a deliberate effort to
+also inspect the row labeled "Sales order".
+
+
+============================================================
+MASTER SALES ORDER FORMAT
+============================================================
+
+The normal master ULP Sales Order format is:
+
+SO-########
 
 That means:
 
 SO-
 followed by exactly 8 digits.
 
-The master Sales Order may appear beside a printed field labeled:
+Examples:
 
-Sales order
-
-It may also correspond to the barcode on the top Pink sheet.
-
-Do NOT create a master Sales Order from any other identifier.
-
-
-============================================================
-SRP NUMBER — SEPARATE IDENTIFIER
-============================================================
-
-SRP_number is a completely separate field.
-
-An SRP number may look similar to a Sales Order.
-
-For example:
-
-SO0316672
-S00316672
-
-These are NOT the master ULP Sales Order.
-
-Example:
-
-Master Sales Order:
+SO-00325352
 SO-00325428
+SO-00325433
 
-SRP Number:
-SO0316672
 
-These must remain separate.
+After reading the actual printed Sales order field, return the
+value only if it matches this format.
 
-NEVER:
+Do NOT:
 
-- insert a hyphen into an SRP number
-- add digits to an SRP number
-- remove digits from an SRP number
-- transform an SRP number into a master Sales Order
-- use SRP_number as a fallback for sales_order
+- reconstruct a Sales Order
+- normalize another identifier into a Sales Order
+- add a hyphen to another identifier
+- infer the Sales Order from the customer PO
+- infer the Sales Order from the SRP number
+- infer the Sales Order from another page
 
-If the master Sales Order is not clearly visible:
+
+If the actual printed Sales order field cannot be read:
 
 sales_order = null
 
-even if an SRP number is visible.
-
 
 ============================================================
-FALSE SALES ORDER EXAMPLES
+SRP NUMBER — COMPLETELY SEPARATE
 ============================================================
 
-Do NOT treat these as master Sales Orders:
+SRP_number is a different identifier from the master Sales Order.
+
+An SRP number may look similar to a Sales Order.
+
+Examples:
 
 SO0316672
 S00316672
-SO 322733
-ORG SO 322733
-322733
 
-A master Sales Order must actually appear as:
+These are NOT master ULP Sales Orders.
 
-SO-########
+
+Example:
+
+Printed Sales order:
+SO-00325428
+
+SRP number:
+SO0316672
+
+Correct result:
+
+sales_order = "SO-00325428"
+SRP_number = "SO0316672"
+
+
+NEVER transform:
+
+SO0316672
+
+into:
+
+SO-00316672
+
+
+NEVER transform:
+
+S00316672
+
+into:
+
+SO-00316672
+
+
+NEVER use SRP_number as a fallback for sales_order.
 
 
 ============================================================
@@ -326,18 +381,37 @@ When visibly present, extract:
 
 
 ============================================================
+CUSTOMER PO
+============================================================
+
+customer_PO should come from the printed field labeled:
+
+Customer PO
+
+or equivalent customer reference when clearly identified as the
+customer's purchase order.
+
+Preserve the printed value.
+
+
+============================================================
 SHIP-TO BLOCK
 ============================================================
 
-Read the complete Ship To block before assigning its lines.
+Read the COMPLETE Ship To block before assigning its lines.
 
-The block may contain:
+A Ship To block may contain:
 
-- organization/company
-- project/site name
-- person's name
-- street address
+- organization/company name
+- project or site name
+- recipient/person name
+- physical street address
 - city/state/ZIP
+
+
+Do not assume that the second line is always the street address.
+
+First determine what each line represents.
 
 
 ============================================================
@@ -347,21 +421,27 @@ STREET ADDRESS IDENTIFICATION — IMPORTANT
 delivery_address should be the line that most clearly represents
 the physical street address.
 
-A US street address usually contains:
+A US street address normally contains:
 
 1. a building/street number
-2. a street or route name
-3. often a street suffix or route designation
+2. followed by a street, road, route, or highway name
+3. often followed by a street suffix
+
 
 Examples:
 
 16777 FILLMORE ST
+
 3580 SOUTH 144TH STREET
+
 401 N FAIRVIEW AVE
+
 499 W ELM STREET
+
 1135 NM 554
 
-Common street words include:
+
+Common street-address words include:
 
 ST
 STREET
@@ -391,9 +471,13 @@ PLACE
 TER
 TERRACE
 
-State-route style addresses may also look like:
+
+State-route style addresses can also be valid physical addresses.
+
+Example:
 
 1135 NM 554
+
 
 A line beginning with a street/building number is a strong clue
 that it is delivery_address.
@@ -403,17 +487,25 @@ that it is delivery_address.
 ADDRESS 2
 ============================================================
 
-Lines in the Ship To block that are NOT the company name,
-street address, or city/state/ZIP may belong in delivery_address2.
+Lines within the Ship To block that are NOT:
 
-Examples include:
+- the primary organization name
+- the physical street address
+- city/state/ZIP
+
+may belong in delivery_address2.
+
+
+These can include:
 
 - project name
 - site name
+- recipient name
+- person's name
 - attention line
-- recipient/person name
-- building or facility name
+- building name
 - suite information
+
 
 Example Ship To block:
 
@@ -422,6 +514,7 @@ QUEENSLAND MANOR
 MEAGAN BIRDSALL
 3580 SOUTH 144TH STREET
 GILBERT, AZ 85297
+
 
 Correct extraction:
 
@@ -443,32 +536,39 @@ AZ
 delivery_zip =
 85297
 
-Do NOT put a person's name into delivery_contact merely because
-the person's name appears in the Ship To address block.
+
+Do NOT discard MEAGAN BIRDSALL.
+
+Do NOT mistake QUEENSLAND MANOR for the street address.
 
 
 ============================================================
 DELIVERY CONTACT
 ============================================================
 
-delivery_contact should normally come from the field explicitly
-labeled:
+delivery_contact should normally come from the printed field
+specifically labeled:
 
 Delivery contact
 
-or the corresponding delivery-contact phone field.
+or another clearly identified delivery-contact field.
 
-If the Pink says:
+Do NOT automatically use a person's name from the Ship To block
+as delivery_contact.
 
-Contact phone     630-897-8489
-Delivery contact  616-566-7124
 
-then:
+Example:
 
-delivery_contact = 616-566-7124
+Contact phone       630-897-8489
+Delivery contact    616-566-7124
 
-Do NOT substitute the general Contact phone when a distinct
-Delivery contact value exists.
+Correct:
+
+delivery_contact = "616-566-7124"
+
+
+If the Delivery contact field includes both a phone number and
+a person's name, preserve both when clearly visible.
 
 
 ============================================================
@@ -485,6 +585,9 @@ Examples:
 
 48 x 48 x 17 / 88# / D19E
 
+98 x 45 x ? / 294# / C21-2
+
+
 Extract:
 
 - length
@@ -495,12 +598,13 @@ Extract:
 
 
 ============================================================
-DIMENSIONS
+DIMENSION ORDER
 ============================================================
 
-Dimensions normally appear:
+Dimensions normally appear as:
 
 L x W x H
+
 
 Typical lengths include:
 
@@ -513,6 +617,7 @@ Typical lengths include:
 120
 144
 
+
 Typical widths commonly include:
 
 40
@@ -521,31 +626,36 @@ Typical widths commonly include:
 45
 48
 
-These are contextual clues only.
 
-The visible handwriting remains the primary source.
+These values are contextual clues only.
+
+The visible handwriting is the primary source.
+
+Do NOT force a value simply because it is common.
 
 
 ============================================================
 NUMBER ROLE CHECK
 ============================================================
 
-Do NOT assume the first three numbers are automatically dimensions.
+Do NOT assume every number in a handwritten line is a dimension.
 
-Determine whether a number represents:
+Determine whether each visible number represents:
 
 - length
 - width
 - height
 - weight
 - location
+- quantity
 - unrelated notation
+
 
 Example:
 
 48 x 44 / 756# / C27
 
-should mean approximately:
+should be interpreted approximately as:
 
 length = 48
 width = 44
@@ -553,21 +663,29 @@ height = null
 weight = 756
 location = C27
 
+
 It should NOT become:
 
-48 x 44 x 756
+length = 48
+width = 44
+height = 756
 
-Also do not split one visible number incorrectly.
+
+============================================================
+DO NOT SPLIT NUMBERS
+============================================================
+
+Do not split one handwritten number into two values unless the
+visual handwriting clearly shows two distinct numbers.
 
 Example:
 
 756
 
-should not become:
+should NOT become:
 
-75 and 6
-
-unless the handwriting clearly supports two separate values.
+75
+6
 
 
 ============================================================
@@ -581,15 +699,21 @@ Be careful with handwritten values such as:
 14 vs 41
 78 vs 98
 
+
 Use the actual visible pen strokes.
 
 If genuinely ambiguous:
 
-- return the best visual interpretation
-- set uncertain=true
+- return the most likely visual interpretation
+- set uncertain = true
 - explain the ambiguity briefly in notes
 
-Do not force a preferred dimension merely because it is common.
+
+Do not force 98 simply because 98 is a common length.
+
+Do not force 78 simply because the pen stroke resembles a 7.
+
+Mark uncertainty when appropriate.
 
 
 ============================================================
@@ -601,8 +725,14 @@ The # symbol commonly means pounds.
 Examples:
 
 88# = 88 pounds
+
 294# = 294 pounds
+
 756# = 756 pounds
+
+
+A large number associated with # is usually weight rather than
+a dimension.
 
 
 ============================================================
@@ -618,6 +748,7 @@ C27
 D24
 D22E
 D19E
+D20E
 C21-2
 A19-E
 
@@ -630,17 +761,22 @@ Do NOT use printed:
 
 - product measurements
 - catalog dimensions
-- item descriptions
+- product-description measurements
 - line-item measurements
 
 as handling-unit dimensions.
+
+
+Handling-unit dimensions should come from the handwritten
+shipping notation unless the document clearly identifies another
+actual handling-unit measurement.
 
 
 ============================================================
 DO NOT CREATE FAKE HANDLING UNITS
 ============================================================
 
-Do not create an HU from:
+Do not create a handling unit from:
 
 - initials
 - signatures
@@ -649,6 +785,8 @@ Do not create an HU from:
 - isolated numbers
 - miscellaneous handwriting
 - packed quantities
+- product measurements
+
 
 A genuine HU should contain meaningful pallet/shipping structure.
 
@@ -657,11 +795,12 @@ A genuine HU should contain meaningful pallet/shipping structure.
 INCOMPLETE HANDLING UNIT
 ============================================================
 
-A real handling unit may have one unreadable field.
+A real handling unit may still contain one unreadable field.
 
 Example:
 
 98 x 45 x ? / 294# / C21-2
+
 
 Return:
 
@@ -673,25 +812,31 @@ location = C21-2
 uncertain = true
 
 
+Do NOT discard the entire HU merely because one field cannot
+be read.
+
+
 ============================================================
-FINAL REVIEW
+FINAL REVIEW — REQUIRED
 ============================================================
 
 Before responding:
 
-1. Search for an actual master SO-########.
-2. Make sure an SRP number was NOT converted into the Sales Order.
-3. Read the entire Ship To block before assigning address fields.
-4. Identify the actual physical street-address line.
-5. Preserve project/person lines in Address 2 when appropriate.
-6. Re-check every handwritten handling unit.
-7. Ensure weights were not treated as dimensions.
-8. Ensure printed product dimensions were ignored.
+1. Locate the literal printed "Sales order" field.
+2. Transcribe its value if readable.
+3. Confirm the Sales Order was NOT created from SRP_number.
+4. Confirm SRP_number remains a separate identifier.
+5. Read the complete Ship To block.
+6. Identify the actual physical street-address line.
+7. Preserve project/person lines in Address 2 when appropriate.
+8. Re-check every handwritten handling unit.
+9. Confirm weights were not interpreted as dimensions.
+10. Confirm printed product dimensions were ignored.
 """
 
 
 # ==========================================================
-# BASIC HELPERS
+# BASIC STRING HELPERS
 # ==========================================================
 
 def _clean_string(
@@ -789,42 +934,6 @@ def _validate_sales_order(
     return value
 
 
-def _sales_order_from_barcode_text(
-    value
-) -> Optional[str]:
-    """
-    Only accept an ACTUAL SO-######## contained in the
-    machine-decoded barcode value.
-
-    Do not convert:
-        S00316672
-        SO0316672
-        00325428
-
-    into Sales Orders.
-    """
-
-    value = _clean_string(
-        value
-    )
-
-    if not value:
-        return None
-
-    value = value.upper()
-
-    match = SALES_ORDER_SEARCH_PATTERN.search(
-        value
-    )
-
-    if not match:
-        return None
-
-    return _validate_sales_order(
-        match.group(0)
-    )
-
-
 # ==========================================================
 # PDF HELPERS
 # ==========================================================
@@ -866,264 +975,6 @@ def _make_single_page_pdf(
     )
 
     return output.getvalue()
-
-
-# ==========================================================
-# BARCODE IMAGE RENDERING
-# ==========================================================
-
-def _render_pdf_page(
-    page_pdf_bytes: bytes,
-    scale: float,
-) -> Image.Image:
-
-    document = fitz.open(
-        stream=page_pdf_bytes,
-        filetype="pdf",
-    )
-
-    try:
-
-        page = document[0]
-
-        matrix = fitz.Matrix(
-            scale,
-            scale,
-        )
-
-        pix = page.get_pixmap(
-            matrix=matrix,
-            alpha=False,
-        )
-
-        image = Image.frombytes(
-            "RGB",
-            [
-                pix.width,
-                pix.height,
-            ],
-            pix.samples,
-        )
-
-        return image
-
-    finally:
-
-        document.close()
-
-
-def _top_crop(
-    image: Image.Image,
-    fraction: float = 0.50,
-) -> Image.Image:
-
-    height = int(
-        image.height
-        * fraction
-    )
-
-    return image.crop(
-        (
-            0,
-            0,
-            image.width,
-            height,
-        )
-    )
-
-
-# ==========================================================
-# BARCODE DECODING
-# ==========================================================
-
-def _decode_image_barcodes(
-    image: Image.Image
-):
-    """
-    Decode one raster variant.
-    """
-
-    try:
-
-        return zxingcpp.read_barcodes(
-            image
-        )
-
-    except Exception:
-
-        return []
-
-
-def _decode_page_barcodes(
-    page_pdf_bytes: bytes,
-) -> Dict[str, Any]:
-    """
-    Lightweight barcode pass.
-
-    Try:
-
-    1. full page at 3x
-    2. top half at 4x
-    3. grayscale top half
-    4. autocontrast top half
-
-    This is intentionally lighter than the previous version.
-    """
-
-    try:
-
-        image_3x = _render_pdf_page(
-            page_pdf_bytes,
-            3.0,
-        )
-
-        image_4x = _render_pdf_page(
-            page_pdf_bytes,
-            4.0,
-        )
-
-        top_4x = _top_crop(
-            image_4x,
-            0.50,
-        )
-
-        gray_top = ImageOps.grayscale(
-            top_4x
-        )
-
-        contrast_top = ImageOps.autocontrast(
-            gray_top
-        )
-
-        variants = [
-            (
-                "full_3x",
-                image_3x,
-            ),
-            (
-                "top_4x",
-                top_4x,
-            ),
-            (
-                "gray_top_4x",
-                gray_top,
-            ),
-            (
-                "contrast_top_4x",
-                contrast_top,
-            ),
-        ]
-
-        decoded_values = []
-        decoded_formats = []
-        successful_variants = []
-
-        barcode_so = None
-
-        seen_values = set()
-
-        for variant_name, image in variants:
-
-            results = _decode_image_barcodes(
-                image
-            )
-
-            if results:
-
-                successful_variants.append(
-                    variant_name
-                )
-
-            for result in results:
-
-                text = _clean_string(
-                    getattr(
-                        result,
-                        "text",
-                        None,
-                    )
-                )
-
-                if not text:
-                    continue
-
-                if text not in seen_values:
-
-                    seen_values.add(
-                        text
-                    )
-
-                    decoded_values.append(
-                        text
-                    )
-
-                fmt = getattr(
-                    result,
-                    "format",
-                    None,
-                )
-
-                if fmt is not None:
-
-                    fmt_text = str(
-                        fmt
-                    )
-
-                    if fmt_text not in decoded_formats:
-
-                        decoded_formats.append(
-                            fmt_text
-                        )
-
-                if barcode_so is None:
-
-                    candidate = (
-                        _sales_order_from_barcode_text(
-                            text
-                        )
-                    )
-
-                    if candidate:
-
-                        barcode_so = candidate
-
-        return {
-            "sales_order":
-                barcode_so,
-
-            "values":
-                decoded_values,
-
-            "formats":
-                decoded_formats,
-
-            "successful_variants":
-                successful_variants,
-
-            "error":
-                None,
-        }
-
-    except Exception as exc:
-
-        return {
-            "sales_order":
-                None,
-
-            "values":
-                [],
-
-            "formats":
-                [],
-
-            "successful_variants":
-                [],
-
-            "error":
-                str(
-                    exc
-                ),
-        }
 
 
 # ==========================================================
@@ -1202,11 +1053,13 @@ def _repair_handling_unit(
     )
 
     # ------------------------------------------------------
+    # LARGE "HEIGHT" THAT IS REALLY A WEIGHT
+    #
     # Example:
     #
     # 48 x 44 x 756
     #
-    # 756 is almost certainly weight, not height.
+    # where 756 is actually pounds.
     # ------------------------------------------------------
 
     if (
@@ -1256,7 +1109,14 @@ def _repair_handling_unit(
     )
 
     # ------------------------------------------------------
-    # Possible 756 -> 75 + 6 split.
+    # POSSIBLE SPLIT NUMBER
+    #
+    # Example:
+    #
+    # 756 incorrectly interpreted as:
+    #
+    # height = 75
+    # weight = 6
     # ------------------------------------------------------
 
     if (
@@ -1292,14 +1152,17 @@ def _repair_handling_unit(
         )
 
     # ------------------------------------------------------
-    # Model says:
+    # CONTRADICTORY HEIGHT
     #
-    # height=75
-    # weight=756
+    # Example:
     #
-    # but notes say height is unclear.
+    # height = 75
+    # weight = 756
     #
-    # Remove the questionable height.
+    # while the model's notes explicitly say the height
+    # was unclear/not visible.
+    #
+    # Preserve obvious weight and clear questionable height.
     # ------------------------------------------------------
 
     height = hu.get(
@@ -1331,16 +1194,30 @@ def _repair_handling_unit(
             or ""
         ).lower()
 
-        if (
+        height_is_described_unclear = (
+
             "height is not clearly" in note_text
+
             or "height is unclear" in note_text
+
             or "height is not legible" in note_text
+
             or "height is unreadable" in note_text
+
+            or "height is not visible" in note_text
+
             or (
                 "height" in note_text
                 and "unclear" in note_text
             )
-        ):
+
+            or (
+                "height" in note_text
+                and "not visible" in note_text
+            )
+        )
+
+        if height_is_described_unclear:
 
             questionable_height = height
 
@@ -1363,7 +1240,7 @@ def _repair_handling_unit(
             )
 
     # ------------------------------------------------------
-    # Extreme dimensions.
+    # EXTREME DIMENSIONS
     # ------------------------------------------------------
 
     for field in [
@@ -1392,6 +1269,10 @@ def _repair_handling_unit(
                     f"normal ULP handling-unit range."
                 )
             )
+
+    # ------------------------------------------------------
+    # UNUSUALLY TALL HEIGHT
+    # ------------------------------------------------------
 
     height = hu.get(
         "height"
@@ -1457,10 +1338,8 @@ def _handling_unit_has_real_data(
     hu: Dict[str, Any]
 ) -> bool:
 
-    dimension_count = (
-        _count_dimensions(
-            hu
-        )
+    dimension_count = _count_dimensions(
+        hu
     )
 
     has_weight = (
@@ -1477,15 +1356,18 @@ def _handling_unit_has_real_data(
         )
     )
 
+    # Strong complete HU.
     if dimension_count >= 3:
         return True
 
+    # Partial dimensions plus weight.
     if (
         dimension_count >= 2
         and has_weight
     ):
         return True
 
+    # Partial dimensions plus warehouse location.
     if (
         dimension_count >= 2
         and has_location
@@ -1495,6 +1377,7 @@ def _handling_unit_has_real_data(
     ):
         return True
 
+    # One dimension + weight + location.
     if (
         dimension_count >= 1
         and has_weight
@@ -1513,18 +1396,23 @@ def _handling_unit_key(
         hu.get(
             "page"
         ),
+
         hu.get(
             "length"
         ),
+
         hu.get(
             "width"
         ),
+
         hu.get(
             "height"
         ),
+
         hu.get(
             "weight"
         ),
+
         _normalize_compare_string(
             hu.get(
                 "location"
@@ -1556,26 +1444,23 @@ def _extract_page_with_gpt(
             f"{original_page_number}.pdf"
         )
 
-        uploaded_file = (
-            client.files.create(
-                file=pdf_file,
-                purpose="user_data",
-            )
+        uploaded_file = client.files.create(
+            file=pdf_file,
+            purpose="user_data",
         )
 
-        uploaded_file_id = (
-            uploaded_file.id
-        )
+        uploaded_file_id = uploaded_file.id
 
         response = client.responses.create(
+
             model=MODEL,
 
             input=[
                 {
-                    "role":
-                        "user",
+                    "role": "user",
 
                     "content": [
+
                         {
                             "type":
                                 "input_text",
@@ -1583,6 +1468,7 @@ def _extract_page_with_gpt(
                             "text":
                                 EXTRACTION_INSTRUCTIONS,
                         },
+
                         {
                             "type":
                                 "input_file",
@@ -1618,7 +1504,6 @@ def _extract_page_with_gpt(
         ).strip()
 
         if not output_text:
-
             raise RuntimeError(
                 "OpenAI returned no extraction output."
             )
@@ -1634,6 +1519,13 @@ def _extract_page_with_gpt(
             or {}
         )
 
+        # --------------------------------------------------
+        # MASTER SO VALIDATION
+        #
+        # GPT must have actually returned SO-########.
+        # Anything else becomes null.
+        # --------------------------------------------------
+
         page_result[
             "sales_order"
         ] = _validate_sales_order(
@@ -1645,6 +1537,10 @@ def _extract_page_with_gpt(
         page_result[
             "page"
         ] = original_page_number
+
+        # --------------------------------------------------
+        # CLEAN HANDLING UNITS
+        # --------------------------------------------------
 
         cleaned_hus = []
 
@@ -1674,6 +1570,10 @@ def _extract_page_with_gpt(
         page_result[
             "handling_units"
         ] = cleaned_hus
+
+        # --------------------------------------------------
+        # USAGE
+        # --------------------------------------------------
 
         usage = {
             "input_tokens": 0,
@@ -1861,10 +1761,8 @@ def _merge_page_into_group(
     page: Dict[str, Any],
 ):
 
-    page_number = (
-        page.get(
-            "page"
-        )
+    page_number = page.get(
+        "page"
     )
 
     if (
@@ -1897,6 +1795,7 @@ def _merge_page_into_group(
             "sales_order"
         ] = page_so
 
+    # First real value wins.
     for field in SHIPMENT_FIELDS:
 
         group[
@@ -1959,7 +1858,6 @@ def _should_start_new_group(
     if not current_group[
         "pages"
     ]:
-
         return False
 
     current_so = _validate_sales_order(
@@ -1974,18 +1872,20 @@ def _should_start_new_group(
         )
     )
 
-    # Different known SOs:
-    # hard shipment boundary.
+    # ------------------------------------------------------
+    # TWO DIFFERENT KNOWN MASTER SALES ORDERS
+    #
+    # Hard boundary.
+    # ------------------------------------------------------
+
     if (
         current_so
         and group_so
         and current_so != group_so
     ):
-
         return True
 
     if not previous_page:
-
         return False
 
     similarity = _page_similarity_score(
@@ -1993,16 +1893,21 @@ def _should_start_new_group(
         current_page,
     )
 
+    # Strong matching identity means same shipment.
     if similarity >= 8:
-
         return False
 
-    # Valid SO appears after unidentified shipment pages.
+    # ------------------------------------------------------
+    # AN SO APPEARS AFTER UNIDENTIFIED PAGES
+    #
+    # Start temporary new group. Backward stitching may
+    # reconnect them.
+    # ------------------------------------------------------
+
     if (
         current_so
         and not group_so
     ):
-
         return True
 
     has_identity = any(
@@ -2020,7 +1925,6 @@ def _should_start_new_group(
     )
 
     if not has_identity:
-
         return False
 
     return True
@@ -2058,7 +1962,6 @@ def _group_is_so_only_or_packing_list(
             "sales_order"
         )
     ):
-
         return False
 
     identity_count = sum(
@@ -2076,7 +1979,9 @@ def _group_is_so_only_or_packing_list(
         )
     )
 
-    return identity_count <= 1
+    return (
+        identity_count <= 1
+    )
 
 
 def _groups_are_adjacent(
@@ -2092,7 +1997,6 @@ def _groups_are_adjacent(
             "pages"
         )
     ):
-
         return False
 
     return (
@@ -2184,7 +2088,6 @@ def _merge_group_into_group(
         )
 
         if key in existing_keys:
-
             continue
 
         target[
@@ -2206,8 +2109,9 @@ def _backward_stitch_sales_orders(
     Dict[str, Any]
 ]:
 
-    if len(groups) < 2:
-
+    if len(
+        groups
+    ) < 2:
         return groups
 
     stitched = []
@@ -2234,17 +2138,21 @@ def _backward_stitch_sales_orders(
             ]
 
             should_stitch = (
+
                 not _validate_sales_order(
                     current.get(
                         "sales_order"
                     )
                 )
+
                 and _group_has_identity(
                     current
                 )
+
                 and _group_is_so_only_or_packing_list(
                     nxt
                 )
+
                 and _groups_are_adjacent(
                     current,
                     nxt,
@@ -2275,7 +2183,7 @@ def _backward_stitch_sales_orders(
 
 
 # ==========================================================
-# GROUP PAGES
+# GROUP PAGES INTO SHIPMENTS
 # ==========================================================
 
 def _group_pages_into_shipments(
@@ -2398,14 +2306,8 @@ def extract_ulp_with_gpt(
         "total_tokens": 0,
     }
 
-    barcode_stats = {
-        "pages_with_barcodes": 0,
-        "sales_orders_found": 0,
-        "decode_errors": 0,
-    }
-
     # ======================================================
-    # ONE PAGE PER GPT CALL
+    # ONE PDF PAGE PER GPT CALL
     # ======================================================
 
     for page_index in range(
@@ -2421,53 +2323,9 @@ def extract_ulp_with_gpt(
             page_index,
         )
 
-        # --------------------------------------------------
-        # BARCODE
-        # --------------------------------------------------
-
-        barcode_result = _decode_page_barcodes(
-            page_pdf
-        )
-
-        barcode_so = _validate_sales_order(
-            barcode_result.get(
-                "sales_order"
-            )
-        )
-
-        barcode_values = (
-            barcode_result.get(
-                "values"
-            )
-            or []
-        )
-
-        if barcode_values:
-
-            barcode_stats[
-                "pages_with_barcodes"
-            ] += 1
-
-        if barcode_so:
-
-            barcode_stats[
-                "sales_orders_found"
-            ] += 1
-
-        if barcode_result.get(
-            "error"
-        ):
-
-            barcode_stats[
-                "decode_errors"
-            ] += 1
-
-        # --------------------------------------------------
-        # GPT
-        # --------------------------------------------------
-
         page_result, usage = (
             _extract_page_with_gpt(
+
                 client=
                     client,
 
@@ -2479,38 +2337,26 @@ def extract_ulp_with_gpt(
             )
         )
 
-        gpt_so = _validate_sales_order(
+        # --------------------------------------------------
+        # STRICT MASTER SO VALIDATION
+        # --------------------------------------------------
+
+        page_result[
+            "sales_order"
+        ] = _validate_sales_order(
             page_result.get(
                 "sales_order"
             )
         )
 
-        # --------------------------------------------------
-        # MASTER SALES ORDER PRIORITY
-        #
-        # BARCODE WINS IF IT DECODED AN ACTUAL SO-########.
-        #
-        # OTHERWISE USE STRICTLY VALID GPT READING.
-        #
-        # SRP IS NEVER USED AS FALLBACK.
-        # --------------------------------------------------
-
-        if barcode_so:
-
-            final_so = barcode_so
-
-        else:
-
-            final_so = gpt_so
-
-        page_result[
-            "sales_order"
-        ] = final_so
-
         page_results.append(
             page_result
         )
 
+        # --------------------------------------------------
+        # TOKEN USAGE
+        # --------------------------------------------------
+
         total_usage[
             "input_tokens"
         ] += usage[
@@ -2528,6 +2374,10 @@ def extract_ulp_with_gpt(
         ] += usage[
             "total_tokens"
         ]
+
+        # --------------------------------------------------
+        # DEBUG OUTPUT
+        # --------------------------------------------------
 
         page_debug.append({
 
@@ -2535,13 +2385,9 @@ def extract_ulp_with_gpt(
                 page_number,
 
             "sales_order":
-                final_so,
-
-            "gpt_sales_order":
-                gpt_so,
-
-            "barcode_sales_order":
-                barcode_so,
+                page_result.get(
+                    "sales_order"
+                ),
 
             "SRP_number":
                 page_result.get(
@@ -2568,24 +2414,24 @@ def extract_ulp_with_gpt(
                     "delivery_address2"
                 ),
 
-            "barcode_values":
-                barcode_values,
+            "delivery_city":
+                page_result.get(
+                    "delivery_city"
+                ),
 
-            "barcode_formats":
-                barcode_result.get(
-                    "formats"
-                )
-                or [],
+            "delivery_state":
+                page_result.get(
+                    "delivery_state"
+                ),
 
-            "barcode_successful_variants":
-                barcode_result.get(
-                    "successful_variants"
-                )
-                or [],
+            "delivery_zip":
+                page_result.get(
+                    "delivery_zip"
+                ),
 
-            "barcode_error":
-                barcode_result.get(
-                    "error"
+            "delivery_contact":
+                page_result.get(
+                    "delivery_contact"
                 ),
 
             "handling_unit_count":
@@ -2601,11 +2447,13 @@ def extract_ulp_with_gpt(
         })
 
     # ======================================================
-    # GROUP INTO SHIPMENTS
+    # GROUP PAGES INTO SHIPMENTS
     # ======================================================
 
-    grouped_shipments = _group_pages_into_shipments(
-        page_results
+    grouped_shipments = (
+        _group_pages_into_shipments(
+            page_results
+        )
     )
 
     return {
@@ -2632,24 +2480,6 @@ def extract_ulp_with_gpt(
 
         "usage":
             total_usage,
-
-        "barcode": {
-
-            "pages_with_barcodes":
-                barcode_stats[
-                    "pages_with_barcodes"
-                ],
-
-            "sales_orders_found":
-                barcode_stats[
-                    "sales_orders_found"
-                ],
-
-            "decode_errors":
-                barcode_stats[
-                    "decode_errors"
-                ],
-        },
 
         "pages":
             page_debug,
