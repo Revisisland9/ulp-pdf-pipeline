@@ -197,7 +197,7 @@ ULP_SCHEMA = {
 
 
 # ==========================================================
-# GPT BASE INSTRUCTIONS
+# GPT INSTRUCTIONS
 # ==========================================================
 
 BASE_EXTRACTION_INSTRUCTIONS = """
@@ -352,7 +352,6 @@ Examples:
 
 98 x 45 x ? / 294# / C21-2
 
-
 Extract:
 
 - length
@@ -400,7 +399,6 @@ Example:
 
 756# = 756 pounds
 
-
 Do not interpret:
 
 48 x 44 / 756# / C27
@@ -416,6 +414,50 @@ width = 44
 height = null
 weight = 756
 location = C27
+
+
+============================================================
+WEIGHT POSITION — IMPORTANT
+============================================================
+
+The handwritten weight may appear BEFORE or AFTER the dimensions.
+
+Do NOT assume the first handwritten number is length.
+
+The # symbol strongly indicates weight regardless of where
+the number appears in the handwritten sequence.
+
+Example:
+
+146#   48 x 48 x 20   A19-E
+
+means:
+
+weight = 146
+length = 48
+width = 48
+height = 20
+location = A19-E
+
+Example:
+
+48 x 48 x 17   88#   D19E
+
+means:
+
+length = 48
+width = 48
+height = 17
+weight = 88
+location = D19E
+
+Before assigning L/W/H:
+
+1. Identify any value marked with # as weight.
+2. Remove the weight value from consideration as a dimension.
+3. Interpret the remaining dimensional sequence as L x W x H.
+
+Weight position is not fixed.
 
 
 ============================================================
@@ -453,7 +495,6 @@ Do not create HUs from:
 - catalog measurements
 - quantities
 
-
 A real HU may still have one missing field.
 
 Example:
@@ -482,8 +523,10 @@ Before responding:
 4. Identify the actual physical street address.
 5. Preserve relevant Address 2 lines.
 6. Find every real handwritten HU.
-7. Do not confuse weight with height.
-8. Do not use printed product dimensions as HU dimensions.
+7. Identify values marked with # as weight regardless of position.
+8. Only after identifying weight, assign L/W/H.
+9. Do not confuse weight with height.
+10. Do not use printed product dimensions as HU dimensions.
 """
 
 
@@ -593,22 +636,6 @@ def _validate_sales_order(
 def _extract_sales_order_from_ocr(
     page_text: str,
 ) -> Optional[str]:
-    """
-    Deterministically recover the master SO from
-    Google Enterprise OCR.
-
-    Priority:
-
-    1. Find the literal Sales order label and search
-       its line / nearby lines.
-
-    2. If there is exactly ONE SO-######## anywhere
-       on the page, accept it.
-
-    We NEVER transform SRP values such as:
-        SO0316672
-        S00316672
-    """
 
     page_text = (
         page_text
@@ -624,11 +651,8 @@ def _extract_sales_order_from_ocr(
         if line.strip()
     ]
 
-    # ------------------------------------------------------
-    # FIRST:
-    # Look specifically around a Sales order label.
-    # ------------------------------------------------------
-
+    # First preference:
+    # literal Sales order field.
     for i, line in enumerate(
         lines
     ):
@@ -639,16 +663,17 @@ def _extract_sales_order_from_ocr(
             line,
         ).strip().lower()
 
+        compact = normalized_label.replace(
+            " ",
+            ""
+        )
+
         if (
             "sales order" not in normalized_label
-            and "salesorder" not in normalized_label.replace(
-                " ",
-                ""
-            )
+            and "salesorder" not in compact
         ):
             continue
 
-        # Search the label line plus the next few OCR lines.
         nearby_lines = lines[
             i:min(
                 i + 4,
@@ -670,37 +695,29 @@ def _extract_sales_order_from_ocr(
                 match.group(0)
             )
 
-    # ------------------------------------------------------
-    # FALLBACK:
-    #
-    # If Google sees exactly one valid SO-######## anywhere
-    # on this page, it is safe to use.
-    #
-    # This does NOT match SO0316672 because the hyphen is
-    # required.
-    # ------------------------------------------------------
-
+    # Conservative fallback:
+    # exactly one valid SO-######## anywhere on page.
     matches = SALES_ORDER_SEARCH_PATTERN.findall(
         page_text
     )
 
     unique_matches = []
-
     seen = set()
 
     for match in matches:
 
         normalized = match.upper()
 
-        if normalized not in seen:
+        if normalized in seen:
+            continue
 
-            seen.add(
-                normalized
-            )
+        seen.add(
+            normalized
+        )
 
-            unique_matches.append(
-                normalized
-            )
+        unique_matches.append(
+            normalized
+        )
 
     if len(
         unique_matches
@@ -867,10 +884,7 @@ def _repair_handling_unit(
         )
     )
 
-    # ------------------------------------------------------
-    # LARGE HEIGHT THAT IS REALLY LIKELY A WEIGHT
-    # ------------------------------------------------------
-
+    # Large "height" that is almost certainly weight.
     if (
         height is not None
         and height >= 240
@@ -901,14 +915,6 @@ def _repair_handling_unit(
             )
         )
 
-    length = hu.get(
-        "length"
-    )
-
-    width = hu.get(
-        "width"
-    )
-
     height = hu.get(
         "height"
     )
@@ -917,12 +923,7 @@ def _repair_handling_unit(
         "weight"
     )
 
-    # ------------------------------------------------------
-    # POSSIBLE SPLIT NUMBER
-    #
-    # 756 -> 75 + 6
-    # ------------------------------------------------------
-
+    # Possible 756 -> 75 + 6 split.
     if (
         uncertain
         and height is not None
@@ -955,10 +956,6 @@ def _repair_handling_unit(
             )
         )
 
-    # ------------------------------------------------------
-    # CONTRADICTORY / QUESTIONABLE HEIGHT
-    # ------------------------------------------------------
-
     height = hu.get(
         "height"
     )
@@ -967,6 +964,8 @@ def _repair_handling_unit(
         "weight"
     )
 
+    # If model explicitly says height is unclear, don't
+    # silently trust a questionable tall value.
     if (
         bool(
             hu.get(
@@ -991,21 +990,10 @@ def _repair_handling_unit(
         height_is_described_unclear = (
 
             "height is not clearly" in note_text
-
             or "height is unclear" in note_text
-
             or "height is not legible" in note_text
-
             or "height is unreadable" in note_text
-
             or "height is not visible" in note_text
-
-            or "height is somewhat ambiguous" in note_text
-
-            or (
-                "height" in note_text
-                and "ambiguous" in note_text
-            )
 
             or (
                 "height" in note_text
@@ -1035,15 +1023,12 @@ def _repair_handling_unit(
                 (
                     f"Height {questionable_height} was removed "
                     f"because the visual extraction identified "
-                    f"the height as ambiguous while weight "
+                    f"the height as unclear while weight "
                     f"{weight} was independently identified."
                 )
             )
 
-    # ------------------------------------------------------
-    # EXTREME DIMENSIONS
-    # ------------------------------------------------------
-
+    # Mark very large dimensions for review.
     for field in [
         "length",
         "width",
@@ -1133,34 +1118,86 @@ def _partial_dimensions_are_plausible(
 def _handling_unit_has_real_data(
     hu: Dict[str, Any]
 ) -> bool:
+    """
+    Reject weak handwritten fragments while keeping genuine
+    complete or incomplete freight HUs.
+    """
 
     dimension_count = _count_dimensions(
         hu
     )
 
-    has_weight = (
-        hu.get(
-            "weight"
-        ) is not None
+    length = hu.get(
+        "length"
     )
 
-    has_location = bool(
-        _clean_string(
-            hu.get(
-                "location"
-            )
+    width = hu.get(
+        "width"
+    )
+
+    height = hu.get(
+        "height"
+    )
+
+    weight = hu.get(
+        "weight"
+    )
+
+    location = _clean_string(
+        hu.get(
+            "location"
         )
     )
 
+    has_weight = (
+        weight is not None
+    )
+
+    has_location = bool(
+        location
+    )
+
+    dimensional_values = [
+        value
+        for value in [
+            length,
+            width,
+            height,
+        ]
+        if value is not None
+    ]
+
+    # Great Neck-style weak fragment:
+    #
+    # 2 / 20#
+    #
+    # No plausible pallet dimension.
+    if (
+        dimension_count <= 2
+        and dimensional_values
+        and max(
+            dimensional_values
+        ) < 30
+    ):
+
+        return False
+
+    # Complete L x W x H.
     if dimension_count >= 3:
         return True
 
+    # Two plausible dimensions + weight.
     if (
         dimension_count >= 2
         and has_weight
+        and _partial_dimensions_are_plausible(
+            hu
+        )
     ):
+
         return True
 
+    # Two plausible dimensions + warehouse location.
     if (
         dimension_count >= 2
         and has_location
@@ -1168,14 +1205,35 @@ def _handling_unit_has_real_data(
             hu
         )
     ):
+
         return True
 
+    # One dimension + weight + location.
     if (
-        dimension_count >= 1
+        dimension_count == 1
         and has_weight
         and has_location
     ):
-        return True
+
+        visible_dimension = next(
+            (
+                value
+                for value in [
+                    length,
+                    width,
+                    height,
+                ]
+                if value is not None
+            ),
+            None,
+        )
+
+        if (
+            visible_dimension is not None
+            and visible_dimension >= 40
+        ):
+
+            return True
 
     return False
 
@@ -1658,6 +1716,7 @@ def _should_start_new_group(
     if not current_group[
         "pages"
     ]:
+
         return False
 
     current_so = _validate_sales_order(
@@ -1677,6 +1736,7 @@ def _should_start_new_group(
         and group_so
         and current_so != group_so
     ):
+
         return True
 
     if not previous_page:
@@ -1717,7 +1777,7 @@ def _should_start_new_group(
 
 
 # ==========================================================
-# BACKWARD SALES ORDER STITCHING
+# BACKWARD STITCHING
 # ==========================================================
 
 def _group_has_identity(
@@ -1748,6 +1808,7 @@ def _group_is_so_only_or_packing_list(
             "sales_order"
         )
     ):
+
         return False
 
     identity_count = sum(
@@ -1783,6 +1844,7 @@ def _groups_are_adjacent(
             "pages"
         )
     ):
+
         return False
 
     return (
@@ -1898,6 +1960,7 @@ def _backward_stitch_sales_orders(
     if len(
         groups
     ) < 2:
+
         return groups
 
     stitched = []
@@ -2080,11 +2143,9 @@ def extract_ulp_with_gpt(
             "PDF contains no pages."
         )
 
-    # ======================================================
-    # STEP 1
-    #
-    # GOOGLE ENTERPRISE OCR — ONCE FOR THE WHOLE PDF
-    # ======================================================
+    # ------------------------------------------------------
+    # GOOGLE ENTERPRISE OCR ONCE FOR WHOLE PDF
+    # ------------------------------------------------------
 
     ocr_result = extract_pink_ocr(
         pdf_bytes
@@ -2094,11 +2155,9 @@ def extract_ulp_with_gpt(
         ocr_result
     )
 
-    # ======================================================
-    # STEP 2
-    #
+    # ------------------------------------------------------
     # GPT PAGE-BY-PAGE
-    # ======================================================
+    # ------------------------------------------------------
 
     client = _get_client()
 
@@ -2139,10 +2198,6 @@ def extract_ulp_with_gpt(
             )
         )
 
-        # --------------------------------------------------
-        # DETERMINISTIC GOOGLE MASTER SO
-        # --------------------------------------------------
-
         google_sales_order = (
             _extract_sales_order_from_ocr(
                 google_ocr_text
@@ -2152,10 +2207,6 @@ def extract_ulp_with_gpt(
         if google_sales_order:
 
             ocr_sales_orders_found += 1
-
-        # --------------------------------------------------
-        # GPT
-        # --------------------------------------------------
 
         page_result, usage = (
             _extract_page_with_gpt(
@@ -2182,15 +2233,7 @@ def extract_ulp_with_gpt(
             )
         )
 
-        # --------------------------------------------------
-        # MASTER SALES ORDER SOURCE PRIORITY
-        #
-        # 1. GOOGLE PRINTED OCR
-        # 2. GPT ONLY IF GOOGLE FOUND NOTHING
-        #
-        # SRP IS NEVER A FALLBACK.
-        # --------------------------------------------------
-
+        # Google printed OCR wins.
         final_sales_order = (
             google_sales_order
             or gpt_sales_order
@@ -2221,10 +2264,6 @@ def extract_ulp_with_gpt(
         ] += usage[
             "total_tokens"
         ]
-
-        # --------------------------------------------------
-        # DEBUG
-        # --------------------------------------------------
 
         page_debug.append({
 
@@ -2302,11 +2341,9 @@ def extract_ulp_with_gpt(
                 usage,
         })
 
-    # ======================================================
-    # STEP 3
-    #
+    # ------------------------------------------------------
     # GROUP PAGES INTO SHIPMENTS
-    # ======================================================
+    # ------------------------------------------------------
 
     grouped_shipments = (
         _group_pages_into_shipments(
