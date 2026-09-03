@@ -4,6 +4,10 @@ import json
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
+import fitz
+import zxingcpp
+
+from PIL import Image
 from openai import OpenAI
 from pypdf import PdfReader, PdfWriter
 
@@ -18,6 +22,11 @@ CHUNK_SIZE = 1
 
 SALES_ORDER_PATTERN = re.compile(
     r"^SO-\d{8}$",
+    re.IGNORECASE,
+)
+
+SALES_ORDER_SEARCH_PATTERN = re.compile(
+    r"SO-\d{8}",
     re.IGNORECASE,
 )
 
@@ -57,7 +66,7 @@ def _get_client():
 
 
 # ==========================================================
-# MAIN PAGE RESPONSE SCHEMA
+# RESPONSE SCHEMA
 # ==========================================================
 
 ULP_SCHEMA = {
@@ -66,63 +75,82 @@ ULP_SCHEMA = {
         "page": {
             "type": "object",
             "properties": {
+
                 "sales_order": {
                     "type": ["string", "null"]
                 },
+
                 "customer_PO": {
                     "type": ["string", "null"]
                 },
+
                 "SRP_number": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_name": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_address": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_address2": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_city": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_state": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_zip": {
                     "type": ["string", "null"]
                 },
+
                 "delivery_contact": {
                     "type": ["string", "null"]
                 },
+
                 "handling_units": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
+
                             "length": {
                                 "type": ["number", "null"]
                             },
+
                             "width": {
                                 "type": ["number", "null"]
                             },
+
                             "height": {
                                 "type": ["number", "null"]
                             },
+
                             "weight": {
                                 "type": ["number", "null"]
                             },
+
                             "location": {
                                 "type": ["string", "null"]
                             },
+
                             "uncertain": {
                                 "type": "boolean"
                             },
+
                             "notes": {
                                 "type": ["string", "null"]
                             }
                         },
+
                         "required": [
                             "length",
                             "width",
@@ -132,10 +160,12 @@ ULP_SCHEMA = {
                             "uncertain",
                             "notes"
                         ],
+
                         "additionalProperties": False
                     }
                 }
             },
+
             "required": [
                 "sales_order",
                 "customer_PO",
@@ -149,36 +179,21 @@ ULP_SCHEMA = {
                 "delivery_contact",
                 "handling_units"
             ],
+
             "additionalProperties": False
         }
     },
+
     "required": [
         "page"
     ],
+
     "additionalProperties": False
 }
 
 
 # ==========================================================
-# SALES ORDER RECOVERY SCHEMA
-# ==========================================================
-
-SALES_ORDER_ONLY_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "sales_order": {
-            "type": ["string", "null"]
-        }
-    },
-    "required": [
-        "sales_order"
-    ],
-    "additionalProperties": False
-}
-
-
-# ==========================================================
-# MAIN PAGE PROMPT
+# GPT INSTRUCTIONS
 # ==========================================================
 
 EXTRACTION_INSTRUCTIONS = """
@@ -196,9 +211,9 @@ If something is not visible on THIS PAGE, return null.
 SALES ORDER
 ============================================================
 
-Actively search the entire page for a valid ULP Sales Order.
+If a valid Sales Order is clearly visible, extract it.
 
-Valid ULP Sales Orders look exactly like:
+A valid ULP Sales Order looks exactly like:
 
 SO-00325355
 
@@ -207,23 +222,24 @@ Format:
 SO-
 followed by exactly 8 digits.
 
-The Sales Order may appear:
-
-- next to the printed label "Sales order"
-- in the upper portion of a Pink sheet
-- in a barcode/header region
-- on a packing list
-
 Do NOT return unrelated references such as:
 
 SO 322733
 ORG SO 322733
 322733
 
-If you cannot confidently find a valid SO-######## on this page,
-return null.
+Do not invent or reconstruct a Sales Order from:
 
-Never infer Sales Order from customer PO or consignee.
+- SRP number
+- Customer PO
+- consignee
+- customer reference
+- another numeric identifier
+
+If a valid SO-######## is not clearly visible, return null.
+
+A separate barcode decoder will independently inspect the page,
+so you do not need to infer the barcode contents.
 
 
 ============================================================
@@ -242,6 +258,8 @@ When visibly present, extract:
 - delivery_state
 - delivery_zip
 - delivery_contact
+
+Preserve visible wording faithfully.
 
 
 ============================================================
@@ -401,98 +419,12 @@ FINAL CHECK
 
 Before responding:
 
-1. Search again for a valid SO-########.
+1. Search for a clearly printed valid SO-########.
 2. Re-scan all handwriting for pallet notation.
 3. Confirm weights were not mistaken for dimensions.
 4. Confirm printed product dimensions were ignored.
 5. Confirm random handwriting was not turned into a pallet.
 """
-
-
-# ==========================================================
-# TARGETED SALES ORDER PROMPT
-# ==========================================================
-
-SALES_ORDER_RECOVERY_INSTRUCTIONS = """
-Your ONLY job is to find the ULP Sales Order on this single page.
-
-Inspect the page very carefully.
-
-A valid Sales Order has exactly this format:
-
-SO-########
-
-Example:
-
-SO-00325352
-
-Search specifically:
-
-1. next to the printed label "Sales order"
-2. the upper/header portion of the page
-3. the barcode area
-4. human-readable text associated with the barcode
-
-On a ULP Pink sheet, the barcode corresponds to the Sales Order.
-
-Do NOT return:
-
-- Customer PO
-- customer reference
-- packing-list number
-- ORG SO notes
-- values like "SO 322733"
-
-Only return a value if it matches:
-
-SO-
-followed by exactly 8 digits.
-
-If no valid Sales Order is actually visible, return null.
-"""
-
-
-# ==========================================================
-# PDF HELPERS
-# ==========================================================
-
-def _get_page_count(
-    pdf_bytes: bytes
-) -> int:
-
-    reader = PdfReader(
-        BytesIO(pdf_bytes)
-    )
-
-    return len(
-        reader.pages
-    )
-
-
-def _make_single_page_pdf(
-    pdf_bytes: bytes,
-    page_index: int,
-) -> bytes:
-
-    reader = PdfReader(
-        BytesIO(pdf_bytes)
-    )
-
-    writer = PdfWriter()
-
-    writer.add_page(
-        reader.pages[
-            page_index
-        ]
-    )
-
-    output = BytesIO()
-
-    writer.write(
-        output
-    )
-
-    return output.getvalue()
 
 
 # ==========================================================
@@ -594,200 +526,230 @@ def _validate_sales_order(
 
 
 # ==========================================================
-# DETERMINE WHETHER SO RECOVERY IS WORTH RUNNING
+# PDF HELPERS
 # ==========================================================
 
-def _should_attempt_so_recovery(
-    page_result: Dict[str, Any]
-) -> bool:
+def _get_page_count(
+    pdf_bytes: bytes
+) -> int:
 
-    if _validate_sales_order(
-        page_result.get(
-            "sales_order"
-        )
-    ):
-        return False
+    reader = PdfReader(
+        BytesIO(pdf_bytes)
+    )
 
-    # Only run the extra call when the page contains
-    # meaningful shipment/header information.
-    return any(
-        _clean_string(
-            page_result.get(
-                field
-            )
-        )
-        for field in [
-            "customer_PO",
-            "delivery_name",
-            "delivery_address",
-            "delivery_zip",
-            "SRP_number",
-        ]
+    return len(
+        reader.pages
     )
 
 
+def _make_single_page_pdf(
+    pdf_bytes: bytes,
+    page_index: int,
+) -> bytes:
+
+    reader = PdfReader(
+        BytesIO(pdf_bytes)
+    )
+
+    writer = PdfWriter()
+
+    writer.add_page(
+        reader.pages[
+            page_index
+        ]
+    )
+
+    output = BytesIO()
+
+    writer.write(
+        output
+    )
+
+    return output.getvalue()
+
+
 # ==========================================================
-# TARGETED SALES ORDER RECOVERY
+# BARCODE DECODING
 # ==========================================================
 
-def _recover_sales_order_with_gpt(
-    client,
+def _render_pdf_page_for_barcode(
     page_pdf_bytes: bytes,
-    original_page_number: int,
-):
+) -> Image.Image:
+    """
+    Render the single PDF page at high resolution.
 
-    uploaded_file_id = None
+    Barcode decoding generally benefits from a higher
+    raster resolution than ordinary OCR.
+
+    3x matrix is roughly 216 DPI for a 72-DPI PDF basis.
+    """
+
+    document = fitz.open(
+        stream=page_pdf_bytes,
+        filetype="pdf",
+    )
 
     try:
 
-        pdf_file = BytesIO(
-            page_pdf_bytes
+        page = document[
+            0
+        ]
+
+        matrix = fitz.Matrix(
+            3.0,
+            3.0,
         )
 
-        pdf_file.name = (
-            f"ulp_so_recovery_"
-            f"{original_page_number}.pdf"
+        pix = page.get_pixmap(
+            matrix=matrix,
+            alpha=False,
         )
 
-        uploaded_file = (
-            client.files.create(
-                file=pdf_file,
-                purpose="user_data",
-            )
+        image = Image.frombytes(
+            "RGB",
+            [
+                pix.width,
+                pix.height,
+            ],
+            pix.samples,
         )
 
-        uploaded_file_id = (
-            uploaded_file.id
-        )
-
-        response = (
-            client.responses.create(
-                model=MODEL,
-
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text":
-                                    SALES_ORDER_RECOVERY_INSTRUCTIONS,
-                            },
-                            {
-                                "type": "input_file",
-                                "file_id":
-                                    uploaded_file_id,
-                            },
-                        ],
-                    }
-                ],
-
-                text={
-                    "format": {
-                        "type":
-                            "json_schema",
-
-                        "name":
-                            "ulp_sales_order_recovery",
-
-                        "strict":
-                            True,
-
-                        "schema":
-                            SALES_ORDER_ONLY_SCHEMA,
-                    }
-                },
-            )
-        )
-
-        output_text = (
-            response.output_text
-            or ""
-        ).strip()
-
-        if not output_text:
-
-            return (
-                None,
-                {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                },
-            )
-
-        try:
-
-            extracted = json.loads(
-                output_text
-            )
-
-        except json.JSONDecodeError:
-
-            return (
-                None,
-                {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                },
-            )
-
-        sales_order = (
-            _validate_sales_order(
-                extracted.get(
-                    "sales_order"
-                )
-            )
-        )
-
-        usage = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-        }
-
-        if response.usage:
-
-            usage[
-                "input_tokens"
-            ] = (
-                response.usage.input_tokens
-                or 0
-            )
-
-            usage[
-                "output_tokens"
-            ] = (
-                response.usage.output_tokens
-                or 0
-            )
-
-            usage[
-                "total_tokens"
-            ] = (
-                response.usage.total_tokens
-                or 0
-            )
-
-        return (
-            sales_order,
-            usage,
-        )
+        return image
 
     finally:
 
-        if uploaded_file_id:
+        document.close()
 
-            try:
 
-                client.files.delete(
-                    uploaded_file_id
+def _sales_order_from_barcode_text(
+    value
+) -> Optional[str]:
+    """
+    Extract ONLY a real SO-######## from decoded
+    barcode contents.
+
+    We intentionally do not transform unrelated
+    numeric strings into Sales Orders.
+    """
+
+    value = _clean_string(
+        value
+    )
+
+    if not value:
+        return None
+
+    value = value.upper()
+
+    match = SALES_ORDER_SEARCH_PATTERN.search(
+        value
+    )
+
+    if not match:
+        return None
+
+    return _validate_sales_order(
+        match.group(0)
+    )
+
+
+def _decode_page_barcodes(
+    page_pdf_bytes: bytes,
+) -> Dict[str, Any]:
+    """
+    Decode all machine-readable barcodes on the page.
+
+    Returns:
+
+    {
+        "sales_order": "SO-00325352" or None,
+        "values": [...],
+        "formats": [...]
+    }
+    """
+
+    try:
+
+        image = _render_pdf_page_for_barcode(
+            page_pdf_bytes
+        )
+
+        results = zxingcpp.read_barcodes(
+            image
+        )
+
+    except Exception as exc:
+
+        return {
+            "sales_order": None,
+            "values": [],
+            "formats": [],
+            "error": str(
+                exc
+            ),
+        }
+
+    decoded_values = []
+    formats = []
+
+    barcode_so = None
+
+    for result in results:
+
+        text = _clean_string(
+            getattr(
+                result,
+                "text",
+                None,
+            )
+        )
+
+        if not text:
+            continue
+
+        decoded_values.append(
+            text
+        )
+
+        fmt = getattr(
+            result,
+            "format",
+            None,
+        )
+
+        if fmt is not None:
+
+            formats.append(
+                str(
+                    fmt
                 )
+            )
 
-            except Exception:
+        if barcode_so is None:
 
-                pass
+            candidate = (
+                _sales_order_from_barcode_text(
+                    text
+                )
+            )
+
+            if candidate:
+
+                barcode_so = candidate
+
+    return {
+        "sales_order":
+            barcode_so,
+
+        "values":
+            decoded_values,
+
+        "formats":
+            formats,
+
+        "error":
+            None,
+    }
 
 
 # ==========================================================
@@ -865,7 +827,14 @@ def _repair_handling_unit(
         )
     )
 
-    # 48 x 44 x 756 -> likely 756 lb
+    # ------------------------------------------------------
+    # Example:
+    #
+    # 48 x 44 x 756
+    #
+    # -> likely 48 x 44 x ? / 756 lb
+    # ------------------------------------------------------
+
     if (
         height is not None
         and height >= 240
@@ -912,7 +881,16 @@ def _repair_handling_unit(
         "weight"
     )
 
-    # Possible 756 -> 75 + 6 split
+    # ------------------------------------------------------
+    # Possible:
+    #
+    # 756
+    #
+    # incorrectly split as:
+    #
+    # 75 + 6
+    # ------------------------------------------------------
+
     if (
         uncertain
         and height is not None
@@ -942,8 +920,9 @@ def _repair_handling_unit(
             hu,
             (
                 f"Possible handwritten number split: "
-                f"height={bad_height} and weight={bad_weight} "
-                f"were not trusted. Verify original notation."
+                f"height={bad_height} and "
+                f"weight={bad_weight} were not trusted. "
+                f"Verify original notation."
             )
         )
 
@@ -969,7 +948,7 @@ def _repair_handling_unit(
             _append_note(
                 hu,
                 (
-                    f"{field}={value} is outside the "
+                    f"{field}={value} is outside "
                     f"normal ULP handling-unit range."
                 )
             )
@@ -1014,13 +993,12 @@ def _partial_dimensions_are_plausible(
         length is None
         or width is None
     ):
+
         return False
 
     length_ok = (
         length in PREFERRED_LENGTHS
-        or (
-            40 <= length <= 160
-        )
+        or 40 <= length <= 160
     )
 
     width_ok = (
@@ -1095,18 +1073,23 @@ def _handling_unit_key(
         hu.get(
             "page"
         ),
+
         hu.get(
             "length"
         ),
+
         hu.get(
             "width"
         ),
+
         hu.get(
             "height"
         ),
+
         hu.get(
             "weight"
         ),
+
         _normalize_compare_string(
             hu.get(
                 "location"
@@ -1116,7 +1099,7 @@ def _handling_unit_key(
 
 
 # ==========================================================
-# MAIN GPT PAGE EXTRACTION
+# GPT PAGE EXTRACTION
 # ==========================================================
 
 def _extract_page_with_gpt(
@@ -1155,7 +1138,9 @@ def _extract_page_with_gpt(
 
                 input=[
                     {
-                        "role": "user",
+                        "role":
+                            "user",
+
                         "content": [
                             {
                                 "type":
@@ -1164,6 +1149,7 @@ def _extract_page_with_gpt(
                                 "text":
                                     EXTRACTION_INSTRUCTIONS,
                             },
+
                             {
                                 "type":
                                     "input_file",
@@ -1225,9 +1211,7 @@ def _extract_page_with_gpt(
 
         page_result[
             "page"
-        ] = (
-            original_page_number
-        )
+        ] = original_page_number
 
         cleaned_hus = []
 
@@ -1242,8 +1226,10 @@ def _extract_page_with_gpt(
                 "page"
             ] = original_page_number
 
-            hu = _repair_handling_unit(
-                hu
+            hu = (
+                _repair_handling_unit(
+                    hu
+                )
             )
 
             if _handling_unit_has_real_data(
@@ -1259,9 +1245,14 @@ def _extract_page_with_gpt(
         ] = cleaned_hus
 
         usage = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
+            "input_tokens":
+                0,
+
+            "output_tokens":
+                0,
+
+            "total_tokens":
+                0,
         }
 
         if response.usage:
@@ -1319,44 +1310,72 @@ def _page_similarity_score(
     score = 0
 
     if _field_matches(
-        a.get("customer_PO"),
-        b.get("customer_PO"),
+        a.get(
+            "customer_PO"
+        ),
+        b.get(
+            "customer_PO"
+        ),
     ):
         score += 12
 
     if _field_matches(
-        a.get("delivery_zip"),
-        b.get("delivery_zip"),
+        a.get(
+            "delivery_zip"
+        ),
+        b.get(
+            "delivery_zip"
+        ),
     ):
         score += 6
 
     if _field_matches(
-        a.get("delivery_name"),
-        b.get("delivery_name"),
+        a.get(
+            "delivery_name"
+        ),
+        b.get(
+            "delivery_name"
+        ),
     ):
         score += 5
 
     if _field_matches(
-        a.get("delivery_address"),
-        b.get("delivery_address"),
+        a.get(
+            "delivery_address"
+        ),
+        b.get(
+            "delivery_address"
+        ),
     ):
         score += 5
 
     if _field_matches(
-        a.get("delivery_city"),
-        b.get("delivery_city"),
+        a.get(
+            "delivery_city"
+        ),
+        b.get(
+            "delivery_city"
+        ),
     ):
         score += 2
 
     if _field_matches(
-        a.get("delivery_state"),
-        b.get("delivery_state"),
+        a.get(
+            "delivery_state"
+        ),
+        b.get(
+            "delivery_state"
+        ),
     ):
         score += 1
 
     if _field_matches(
-        a.get("delivery_contact"),
-        b.get("delivery_contact"),
+        a.get(
+            "delivery_contact"
+        ),
+        b.get(
+            "delivery_contact"
+        ),
     ):
         score += 2
 
@@ -1383,18 +1402,41 @@ SHIPMENT_FIELDS = [
 def _new_shipment_group():
 
     return {
-        "sales_order": None,
-        "pages": [],
-        "customer_PO": None,
-        "SRP_number": None,
-        "delivery_name": None,
-        "delivery_address": None,
-        "delivery_address2": None,
-        "delivery_city": None,
-        "delivery_state": None,
-        "delivery_zip": None,
-        "delivery_contact": None,
-        "handling_units": [],
+        "sales_order":
+            None,
+
+        "pages":
+            [],
+
+        "customer_PO":
+            None,
+
+        "SRP_number":
+            None,
+
+        "delivery_name":
+            None,
+
+        "delivery_address":
+            None,
+
+        "delivery_address2":
+            None,
+
+        "delivery_city":
+            None,
+
+        "delivery_state":
+            None,
+
+        "delivery_zip":
+            None,
+
+        "delivery_contact":
+            None,
+
+        "handling_units":
+            [],
     }
 
 
@@ -1403,8 +1445,10 @@ def _merge_page_into_group(
     page: Dict[str, Any],
 ):
 
-    page_number = page.get(
-        "page"
+    page_number = (
+        page.get(
+            "page"
+        )
     )
 
     if (
@@ -1420,9 +1464,11 @@ def _merge_page_into_group(
             page_number
         )
 
-    page_so = _validate_sales_order(
-        page.get(
-            "sales_order"
+    page_so = (
+        _validate_sales_order(
+            page.get(
+                "sales_order"
+            )
         )
     )
 
@@ -1466,8 +1512,10 @@ def _merge_page_into_group(
         or []
     ):
 
-        key = _handling_unit_key(
-            hu
+        key = (
+            _handling_unit_key(
+                hu
+            )
         )
 
         if key in existing_keys:
@@ -1499,43 +1547,58 @@ def _should_start_new_group(
     if not current_group[
         "pages"
     ]:
+
         return False
 
-    current_so = _validate_sales_order(
-        current_page.get(
-            "sales_order"
+    current_so = (
+        _validate_sales_order(
+            current_page.get(
+                "sales_order"
+            )
         )
     )
 
-    group_so = _validate_sales_order(
-        current_group.get(
-            "sales_order"
+    group_so = (
+        _validate_sales_order(
+            current_group.get(
+                "sales_order"
+            )
         )
     )
 
+    # Two different known Sales Orders:
+    # hard shipment boundary.
     if (
         current_so
         and group_so
-        and current_so
-        != group_so
+        and current_so != group_so
     ):
+
         return True
 
     if not previous_page:
+
         return False
 
-    similarity = _page_similarity_score(
-        previous_page,
-        current_page,
+    similarity = (
+        _page_similarity_score(
+            previous_page,
+            current_page,
+        )
     )
 
     if similarity >= 8:
+
         return False
 
+    # A valid SO appears after unidentified shipment pages.
+    # Start a temporary new group; backward stitching will
+    # join it if appropriate.
     if (
         current_so
         and not group_so
     ):
+
         return True
 
     has_identity = any(
@@ -1553,13 +1616,14 @@ def _should_start_new_group(
     )
 
     if not has_identity:
+
         return False
 
     return True
 
 
 # ==========================================================
-# BACKWARD SO STITCHING
+# BACKWARD SALES ORDER STITCHING
 # ==========================================================
 
 def _group_has_identity(
@@ -1590,6 +1654,7 @@ def _group_is_so_only_or_packing_list(
             "sales_order"
         )
     ):
+
         return False
 
     identity_count = sum(
@@ -1607,7 +1672,9 @@ def _group_is_so_only_or_packing_list(
         )
     )
 
-    return identity_count <= 1
+    return (
+        identity_count <= 1
+    )
 
 
 def _groups_are_adjacent(
@@ -1623,6 +1690,7 @@ def _groups_are_adjacent(
             "pages"
         )
     ):
+
         return False
 
     return (
@@ -1656,15 +1724,18 @@ def _merge_group_into_group(
         if page not in target[
             "pages"
         ]:
+
             target[
                 "pages"
             ].append(
                 page
             )
 
-    source_so = _validate_sales_order(
-        source.get(
-            "sales_order"
+    source_so = (
+        _validate_sales_order(
+            source.get(
+                "sales_order"
+            )
         )
     )
 
@@ -1708,11 +1779,14 @@ def _merge_group_into_group(
         or []
     ):
 
-        key = _handling_unit_key(
-            hu
+        key = (
+            _handling_unit_key(
+                hu
+            )
         )
 
         if key in existing_keys:
+
             continue
 
         target[
@@ -1734,14 +1808,19 @@ def _backward_stitch_sales_orders(
     Dict[str, Any]
 ]:
 
-    if len(groups) < 2:
+    if len(
+        groups
+    ) < 2:
+
         return groups
 
     stitched = []
 
     i = 0
 
-    while i < len(groups):
+    while i < len(
+        groups
+    ):
 
         current = groups[
             i
@@ -1749,7 +1828,9 @@ def _backward_stitch_sales_orders(
 
         if (
             i + 1
-            < len(groups)
+            < len(
+                groups
+            )
         ):
 
             nxt = groups[
@@ -1811,7 +1892,9 @@ def _group_pages_into_shipments(
 
     groups = []
 
-    current_group = _new_shipment_group()
+    current_group = (
+        _new_shipment_group()
+    )
 
     previous_page = None
 
@@ -1831,7 +1914,9 @@ def _group_pages_into_shipments(
                     current_group
                 )
 
-            current_group = _new_shipment_group()
+            current_group = (
+                _new_shipment_group()
+            )
 
         _merge_page_into_group(
             current_group,
@@ -1848,8 +1933,10 @@ def _group_pages_into_shipments(
             current_group
         )
 
-    groups = _backward_stitch_sales_orders(
-        groups
+    groups = (
+        _backward_stitch_sales_orders(
+            groups
+        )
     )
 
     for group in groups:
@@ -1890,36 +1977,51 @@ def extract_ulp_with_gpt(
 ):
 
     if not pdf_bytes:
+
         raise ValueError(
             "PDF is empty."
         )
 
-    total_pages = _get_page_count(
-        pdf_bytes
+    total_pages = (
+        _get_page_count(
+            pdf_bytes
+        )
     )
 
     if total_pages <= 0:
+
         raise ValueError(
             "PDF contains no pages."
         )
 
-    client = _get_client()
+    client = (
+        _get_client()
+    )
 
     page_results = []
+
     page_debug = []
 
     total_usage = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
+        "input_tokens":
+            0,
+
+        "output_tokens":
+            0,
+
+        "total_tokens":
+            0,
     }
 
-    recovery_usage = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "attempts": 0,
-        "successes": 0,
+    barcode_stats = {
+        "pages_with_barcodes":
+            0,
+
+        "sales_orders_found":
+            0,
+
+        "decode_errors":
+            0,
     }
 
     # ======================================================
@@ -1934,10 +2036,59 @@ def extract_ulp_with_gpt(
             page_index + 1
         )
 
-        page_pdf = _make_single_page_pdf(
-            pdf_bytes,
-            page_index,
+        page_pdf = (
+            _make_single_page_pdf(
+                pdf_bytes,
+                page_index,
+            )
         )
+
+        # --------------------------------------------------
+        # MACHINE BARCODE DECODING
+        # --------------------------------------------------
+
+        barcode_result = (
+            _decode_page_barcodes(
+                page_pdf
+            )
+        )
+
+        barcode_so = (
+            barcode_result.get(
+                "sales_order"
+            )
+        )
+
+        barcode_values = (
+            barcode_result.get(
+                "values"
+            )
+            or []
+        )
+
+        if barcode_values:
+
+            barcode_stats[
+                "pages_with_barcodes"
+            ] += 1
+
+        if barcode_so:
+
+            barcode_stats[
+                "sales_orders_found"
+            ] += 1
+
+        if barcode_result.get(
+            "error"
+        ):
+
+            barcode_stats[
+                "decode_errors"
+            ] += 1
+
+        # --------------------------------------------------
+        # GPT VISUAL EXTRACTION
+        # --------------------------------------------------
 
         page_result, usage = (
             _extract_page_with_gpt(
@@ -1952,60 +2103,31 @@ def extract_ulp_with_gpt(
             )
         )
 
-        # ==================================================
-        # TARGETED SO RECOVERY
-        # ==================================================
-
-        recovered_so = None
-
-        if _should_attempt_so_recovery(
-            page_result
-        ):
-
-            recovery_usage[
-                "attempts"
-            ] += 1
-
-            recovered_so, so_usage = (
-                _recover_sales_order_with_gpt(
-                    client=
-                        client,
-
-                    page_pdf_bytes=
-                        page_pdf,
-
-                    original_page_number=
-                        page_number,
+        gpt_so = (
+            _validate_sales_order(
+                page_result.get(
+                    "sales_order"
                 )
             )
+        )
 
-            recovery_usage[
-                "input_tokens"
-            ] += so_usage[
-                "input_tokens"
-            ]
+        # --------------------------------------------------
+        # SALES ORDER PRIORITY
+        #
+        # MACHINE-DECODED BARCODE WINS.
+        # --------------------------------------------------
 
-            recovery_usage[
-                "output_tokens"
-            ] += so_usage[
-                "output_tokens"
-            ]
+        if barcode_so:
 
-            recovery_usage[
-                "total_tokens"
-            ] += so_usage[
-                "total_tokens"
-            ]
+            page_result[
+                "sales_order"
+            ] = barcode_so
 
-            if recovered_so:
+        else:
 
-                page_result[
-                    "sales_order"
-                ] = recovered_so
-
-                recovery_usage[
-                    "successes"
-                ] += 1
+            page_result[
+                "sales_order"
+            ] = gpt_so
 
         page_results.append(
             page_result
@@ -2029,7 +2151,12 @@ def extract_ulp_with_gpt(
             "total_tokens"
         ]
 
+        # --------------------------------------------------
+        # DEBUGGING
+        # --------------------------------------------------
+
         page_debug.append({
+
             "page":
                 page_number,
 
@@ -2038,8 +2165,25 @@ def extract_ulp_with_gpt(
                     "sales_order"
                 ),
 
-            "sales_order_recovered":
-                recovered_so,
+            "gpt_sales_order":
+                gpt_so,
+
+            "barcode_sales_order":
+                barcode_so,
+
+            "barcode_values":
+                barcode_values,
+
+            "barcode_formats":
+                barcode_result.get(
+                    "formats"
+                )
+                or [],
+
+            "barcode_error":
+                barcode_result.get(
+                    "error"
+                ),
 
             "customer_PO":
                 page_result.get(
@@ -2058,24 +2202,9 @@ def extract_ulp_with_gpt(
                 usage,
         })
 
-    # Include recovery tokens in grand total.
-    total_usage[
-        "input_tokens"
-    ] += recovery_usage[
-        "input_tokens"
-    ]
-
-    total_usage[
-        "output_tokens"
-    ] += recovery_usage[
-        "output_tokens"
-    ]
-
-    total_usage[
-        "total_tokens"
-    ] += recovery_usage[
-        "total_tokens"
-    ]
+    # ======================================================
+    # PYTHON ASSEMBLES SHIPMENTS
+    # ======================================================
 
     grouped_shipments = (
         _group_pages_into_shipments(
@@ -2107,30 +2236,20 @@ def extract_ulp_with_gpt(
         "usage":
             total_usage,
 
-        "sales_order_recovery": {
-            "attempts":
-                recovery_usage[
-                    "attempts"
+        "barcode": {
+            "pages_with_barcodes":
+                barcode_stats[
+                    "pages_with_barcodes"
                 ],
 
-            "successes":
-                recovery_usage[
-                    "successes"
+            "sales_orders_found":
+                barcode_stats[
+                    "sales_orders_found"
                 ],
 
-            "input_tokens":
-                recovery_usage[
-                    "input_tokens"
-                ],
-
-            "output_tokens":
-                recovery_usage[
-                    "output_tokens"
-                ],
-
-            "total_tokens":
-                recovery_usage[
-                    "total_tokens"
+            "decode_errors":
+                barcode_stats[
+                    "decode_errors"
                 ],
         },
 
