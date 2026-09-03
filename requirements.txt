@@ -6,6 +6,3 @@ google-cloud-documentai
 python-multipart
 pypdf
 openai
-pymupdf
-zxing-cpp
-Pillow
