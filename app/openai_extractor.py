@@ -385,15 +385,116 @@ delivery contact.
 
 
 ============================================================
-HANDLING-UNIT TABLE — MOST IMPORTANT SECTION
+HANDLING UNIT EXTRACTION — TWO POSSIBLE PAGE LAYOUTS
 ============================================================
 
-Your job is NOT to normalize the handwritten handling units.
+There are TWO valid ways handwritten handling units may appear.
 
-Your first job is to TRANSCRIBE THE HANDWRITTEN TABLE ROW BY ROW.
+You MUST first determine which layout is present on the page.
 
-Return EVERY genuine handwritten skid / handling-unit row in
-the exact visual TOP-TO-BOTTOM sequence in which it appears.
+LAYOUT A:
+PRINTED SKID / HANDLING-UNIT GRID
+
+LAYOUT B:
+FREE-FORM HANDWRITING ON THE MAIN SALES ORDER PAGE
+
+Both layouts ultimately produce the SAME raw handling-unit row
+schema.
+
+
+============================================================
+LAYOUT A — PRINTED GRID
+============================================================
+
+Some packing-list pages contain printed skid / handling-unit
+tables.
+
+These tables may contain fixed horizontal row slots.
+
+A common form has 5 printed row slots in each skid column.
+
+IMPORTANT:
+
+The PRINTED HORIZONTAL ROW LINES define the physical HU rows.
+
+Do NOT treat the handwriting as a loose cluster.
+
+Do NOT sort values based only on where the handwriting appears
+relative to other handwriting.
+
+Instead:
+
+1. Identify the printed row boundaries.
+2. Identify each physical row slot from TOP to BOTTOM.
+3. Assign handwritten dimensions, weight, and location to the
+   row slot in which they physically appear.
+4. Preserve that printed row order exactly.
+
+If the form continues into another printed column, continue
+reading physical HU rows in the natural form order.
+
+Never reorder rows by:
+
+- dimensions
+- weight
+- location
+- handwriting proximity
+- similarity to another HU
+
+
+============================================================
+GRID ROW ASSOCIATION
+============================================================
+
+When handwriting is messy or drifts near a printed line:
+
+Use the printed row boundaries as the primary structure.
+
+Assign a handwritten value to the row whose area contains the
+visual center / baseline of the handwriting.
+
+Do not move a value upward or downward simply because it is
+closer to another handwritten value.
+
+Dimensions, weight, and location that visually belong to the
+same printed row must remain associated with that row.
+
+
+============================================================
+LAYOUT B — FREE-FORM MAIN SO PAGE
+============================================================
+
+Handling units may also be handwritten directly on the main
+Sales Order page.
+
+These may NOT have a printed 5-row grid.
+
+In that case:
+
+1. Visually identify each genuine HU annotation.
+2. Read them in natural TOP-TO-BOTTOM order.
+3. Preserve every genuine HU separately.
+4. Use proximity and freight notation to associate dimensions,
+   weight, and location.
+
+Do NOT require a printed grid in order to extract a handling unit.
+
+A valid free-form HU may look like:
+
+48 x 48 x 20   242#   A19-E
+
+or:
+
+242#   48 x 48 x 20   A19-E
+
+
+============================================================
+RAW HANDLING UNIT OUTPUT
+============================================================
+
+Your job is to TRANSCRIBE the handwritten HUs into raw rows.
+
+Return EVERY genuine physical HU.
 
 Use:
 
@@ -402,8 +503,7 @@ row_index = 2
 row_index = 3
 ...
 
-Do not reorder rows based on dimensions, weight, location,
-product, or anything else.
+The row_index must represent the actual visual/physical HU order.
 
 Do not combine identical rows.
 
@@ -421,7 +521,7 @@ separate rows.
 RAW DIMENSIONS
 ============================================================
 
-For an explicitly written dimension set, copy what you see into:
+For explicitly written dimensions, copy what you see into:
 
 raw_dimensions
 
@@ -431,9 +531,9 @@ Examples:
 98 x 45 x 44
 48 x 48 x 17
 
-Do not normalize the numbers yourself.
+Do not normalize the values yourself.
 
-Python will parse raw_dimensions afterward.
+Python will parse them afterward.
 
 
 ============================================================
@@ -451,8 +551,9 @@ Examples:
 195
 242#
 
-The # symbol means pounds and may appear before or after the
-dimensions.
+The # symbol means pounds.
+
+Weight may appear BEFORE or AFTER the dimensions.
 
 Do not assume the first handwritten number is length.
 
@@ -484,41 +585,40 @@ DITTO / QUOTATION MARKS — CRITICAL
 The shipper may use handwritten quotation marks, double quotes,
 pairs of short strokes, or ditto marks to mean:
 
-SAME VALUE AS THE IMMEDIATELY PRECEDING HANDLING-UNIT ROW.
+SAME VALUE AS THE IMMEDIATELY PRECEDING PHYSICAL HU ROW.
 
-Examples of possible marks:
+Examples:
 
 "
 ''
 〃
 
-The mark may be messy and may not look like a perfect
-typographic quotation mark.
+The marks may be handwritten loosely.
 
-Interpret the mark according to the COLUMN / POSITION where
-it appears.
+Interpret them according to the FIELD / COLUMN position where
+they appear.
 
 
 ------------------------------------------------------------
 DIMENSION DITTO
 ------------------------------------------------------------
 
-If the dimension area contains quotation / ditto marks rather
-than a new dimension:
+If the dimension area contains a ditto mark instead of newly
+written dimensions:
 
 dimensions_are_ditto = true
 raw_dimensions = null
 
-Do NOT fill in the previous dimensions yourself.
+Do NOT copy the previous dimensions yourself.
 
-Python will do that later.
+Python will resolve the inheritance.
 
 
 ------------------------------------------------------------
 WEIGHT DITTO
 ------------------------------------------------------------
 
-If the weight area contains a quotation / ditto mark:
+If the weight area contains a ditto mark:
 
 weight_is_ditto = true
 raw_weight = null
@@ -528,15 +628,15 @@ raw_weight = null
 LOCATION DITTO
 ------------------------------------------------------------
 
-If the location area contains a quotation / ditto mark:
+If the location area contains a ditto mark:
 
 location_is_ditto = true
 raw_location = null
 
 
-------------------------------------------------------------
+============================================================
 DITTO MARKS ARE FIELD-SPECIFIC
-------------------------------------------------------------
+============================================================
 
 A ditto in dimensions repeats dimensions only.
 
@@ -563,146 +663,215 @@ location_is_ditto = false
 
 
 ============================================================
-PAGE-5 STYLE EXAMPLE
+DITTO IN A PRINTED GRID
 ============================================================
 
-Suppose the handwritten page visually means:
+When a printed grid is present, the ditto always refers to the
+IMMEDIATELY PREVIOUS PHYSICAL ROW SLOT.
 
+Example:
+
+ROW 1:
 79 x 32 x 32   162   D19
+
+ROW 2:
 "              162   D19
+
+ROW 3:
 "              164   D20
-"              167   C17
-"              165   A23
-"              164   C26
-79 x 32 x 40   192   D21
-"              195   B21
 
-You MUST return EIGHT raw rows in exactly that order.
+means:
 
-Row 1:
+row_index 1:
 raw_dimensions = "79 x 32 x 32"
 dimensions_are_ditto = false
 raw_weight = "162"
 raw_location = "D19"
 
-Row 2:
+row_index 2:
 raw_dimensions = null
 dimensions_are_ditto = true
 raw_weight = "162"
 raw_location = "D19"
 
-Row 3:
+row_index 3:
 raw_dimensions = null
 dimensions_are_ditto = true
 raw_weight = "164"
 raw_location = "D20"
 
-Row 4:
+
+============================================================
+DITTO IN FREE-FORM HANDWRITING
+============================================================
+
+Ditto notation may also appear on a main Sales Order page
+without a printed grid.
+
+In that situation, the ditto refers to the immediately previous
+genuine HU in visual TOP-TO-BOTTOM order.
+
+Do not require grid lines for ditto behavior.
+
+
+============================================================
+NEW EXPLICIT VALUE RESETS THE CARRY-FORWARD VALUE
+============================================================
+
+If the visual rows are:
+
+79 x 32 x 32
+"
+"
+79 x 32 x 40
+"
+
+then the raw transcription should be:
+
+ROW 1:
+raw_dimensions = "79 x 32 x 32"
+dimensions_are_ditto = false
+
+ROW 2:
 raw_dimensions = null
 dimensions_are_ditto = true
-raw_weight = "167"
-raw_location = "C17"
 
-Row 5:
+ROW 3:
 raw_dimensions = null
 dimensions_are_ditto = true
-raw_weight = "165"
-raw_location = "A23"
 
-Row 6:
-raw_dimensions = null
-dimensions_are_ditto = true
-raw_weight = "164"
-raw_location = "C26"
-
-Row 7:
+ROW 4:
 raw_dimensions = "79 x 32 x 40"
 dimensions_are_ditto = false
-raw_weight = "192"
-raw_location = "D21"
 
-Row 8:
+ROW 5:
 raw_dimensions = null
 dimensions_are_ditto = true
-raw_weight = "195"
-raw_location = "B21"
 
-Python will later resolve the repeated dimensions.
-
-
-============================================================
-NEW EXPLICIT VALUE RESETS THE DITTO CHAIN
-============================================================
-
-If the page says:
-
-79 x 32 x 32
-"
-"
-79 x 32 x 40
-"
-
-then the final interpreted sequence is:
-
-79 x 32 x 32
-79 x 32 x 32
-79 x 32 x 32
-79 x 32 x 40
-79 x 32 x 40
-
-But YOU should return the RAW rows and the ditto flags.
-
-Do not perform that inheritance yourself.
+Python will resolve the final values.
 
 
 ============================================================
 NO BACKWARD INFERENCE
 ============================================================
 
-A ditto may only refer to the handling-unit row immediately
-above it.
+A ditto may only refer to the immediately preceding genuine HU.
 
 Never use a later row to fill an earlier row.
 
-Never invent a value when it is not visible.
+Never invent a previous value.
+
+Never carry a ditto value across a different shipment.
 
 
 ============================================================
 DO NOT DEDUPLICATE
 ============================================================
 
-This is extremely important.
-
-If two rows are visually separate but contain identical values,
-return both rows.
+If two physical rows contain identical values, return both.
 
 Example:
 
 79 x 32 x 32 / 162 / D19
 79 x 32 x 32 / 162 / D19
 
-must result in TWO rows.
+must result in TWO raw rows.
 
 They represent two physical skids.
 
 
 ============================================================
-DO NOT CREATE FAKE ROWS
+DO NOT CREATE FAKE HUS
 ============================================================
 
 Do not create handling-unit rows from:
 
 - signatures
 - initials
-- random marks
+- check marks
 - printed product dimensions
-- catalog dimensions
+- catalog measurements
 - quantities
-- lone numbers unrelated to a skid row
+- random handwritten notes
+- isolated small numbers
+- lone location-like marks without a genuine HU context
 
-A genuine row may have a missing value.
+A genuine HU may have one missing value.
 
 Preserve it and set uncertain=true if appropriate.
+
+
+============================================================
+WEIGHT / DIMENSION INTERPRETATION
+============================================================
+
+The # symbol strongly indicates pounds.
+
+Example:
+
+242#   48 x 48 x 20   A19-E
+
+means:
+
+weight = 242
+
+dimensions =
+48 x 48 x 20
+
+location =
+A19-E
+
+Weight may appear first.
+
+Do not treat a # value as a dimension.
+
+
+============================================================
+COMMON DIMENSION CLUES
+============================================================
+
+Typical lengths may include:
+
+48
+72
+74
+79
+96
+98
+120
+144
+
+Typical widths may include:
+
+40
+42
+44
+45
+48
+
+These are clues only.
+
+Never force a value just because it is common.
+
+
+============================================================
+AMBIGUOUS HANDWRITING
+============================================================
+
+Be careful with:
+
+19 vs 91
+17 vs 71
+14 vs 41
+78 vs 98
+C vs D
+C vs 0
+
+If genuinely ambiguous:
+
+- return the most likely visible transcription
+- set uncertain=true
+- briefly explain the ambiguity in notes
 
 
 ============================================================
@@ -714,18 +883,21 @@ Before responding:
 1. Keep SRP separate from master Sales Order.
 2. Use Google OCR for printed information.
 3. Use the page image for handwriting.
-4. Return every genuine handwritten skid row.
-5. Preserve exact top-to-bottom row order.
-6. Never deduplicate physically separate rows.
-7. Recognize ditto marks by their column position.
-8. Set field-specific ditto flags.
-9. Do not resolve ditto values yourself.
-10. Preserve explicit handwritten weight values.
-11. Preserve explicit handwritten locations.
-12. Weight may occur before or after dimensions.
-13. Do not use printed product dimensions as skid dimensions.
+4. Determine whether the page uses:
+   - printed-grid HU extraction, or
+   - free-form HU extraction.
+5. If a printed grid exists, use the printed horizontal row
+   boundaries as the primary HU structure.
+6. If no grid exists, extract free-form handwritten HUs normally.
+7. Preserve exact physical HU order.
+8. Return every genuine physical HU.
+9. Never deduplicate identical physical HUs.
+10. Recognize field-specific ditto marks.
+11. Do not resolve ditto values yourself.
+12. Preserve explicit handwritten weights and locations.
+13. Do not confuse weight with dimensions.
+14. Do not use printed product dimensions as HU dimensions.
 """
-
 
 # ==========================================================
 # BASIC HELPERS
