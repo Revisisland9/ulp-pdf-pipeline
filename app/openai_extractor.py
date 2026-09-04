@@ -18,7 +18,6 @@ from app.document_ai import extract_pink_ocr
 
 
 MODEL = "gpt-5.4-mini"
-CHUNK_SIZE = 1
 
 
 # ==========================================================
@@ -62,7 +61,6 @@ def _get_client():
     )
 
     if not api_key:
-
         raise RuntimeError(
             "OPENAI_API_KEY is not configured."
         )
@@ -156,7 +154,11 @@ ULP_SCHEMA = {
                     ]
                 },
 
-                "handling_units": {
+                # ==========================================
+                # RAW HANDWRITTEN TABLE ROWS
+                # ==========================================
+
+                "handling_unit_rows": {
                     "type": "array",
 
                     "items": {
@@ -164,54 +166,40 @@ ULP_SCHEMA = {
 
                         "properties": {
 
-                            "length": {
-                                "type": [
-                                    "number",
-                                    "null",
-                                ]
+                            "row_index": {
+                                "type": "integer"
                             },
 
-                            "width": {
-                                "type": [
-                                    "number",
-                                    "null",
-                                ]
-                            },
-
-                            "height": {
-                                "type": [
-                                    "number",
-                                    "null",
-                                ]
-                            },
-
-                            "weight": {
-                                "type": [
-                                    "number",
-                                    "null",
-                                ]
-                            },
-
-                            "location": {
+                            "raw_dimensions": {
                                 "type": [
                                     "string",
                                     "null",
                                 ]
                             },
 
-                            # --------------------------------
-                            # DITTO FLAGS
-                            # --------------------------------
-
-                            "repeat_dimensions": {
+                            "dimensions_are_ditto": {
                                 "type": "boolean"
                             },
 
-                            "repeat_weight": {
+                            "raw_weight": {
+                                "type": [
+                                    "string",
+                                    "null",
+                                ]
+                            },
+
+                            "weight_is_ditto": {
                                 "type": "boolean"
                             },
 
-                            "repeat_location": {
+                            "raw_location": {
+                                "type": [
+                                    "string",
+                                    "null",
+                                ]
+                            },
+
+                            "location_is_ditto": {
                                 "type": "boolean"
                             },
 
@@ -228,14 +216,13 @@ ULP_SCHEMA = {
                         },
 
                         "required": [
-                            "length",
-                            "width",
-                            "height",
-                            "weight",
-                            "location",
-                            "repeat_dimensions",
-                            "repeat_weight",
-                            "repeat_location",
+                            "row_index",
+                            "raw_dimensions",
+                            "dimensions_are_ditto",
+                            "raw_weight",
+                            "weight_is_ditto",
+                            "raw_location",
+                            "location_is_ditto",
                             "uncertain",
                             "notes",
                         ],
@@ -256,7 +243,7 @@ ULP_SCHEMA = {
                 "delivery_state",
                 "delivery_zip",
                 "delivery_contact",
-                "handling_units",
+                "handling_unit_rows",
             ],
 
             "additionalProperties": False,
@@ -282,59 +269,59 @@ shipping document page.
 You receive TWO sources:
 
 1. GOOGLE OCR TEXT
-   This is intended primarily for PRINTED information.
+   Use this primarily for PRINTED information.
 
 2. THE ORIGINAL PAGE IMAGE/PDF
-   Use this especially for HANDWRITTEN handling-unit information.
+   Use this especially for HANDWRITTEN skid / handling-unit rows.
 
-Do not infer information from previous or following pages.
+Do not infer information from previous or following PDF pages.
 
 
 ============================================================
 SOURCE PRIORITY
 ============================================================
 
-For printed fields, use the Google OCR text whenever possible.
+For printed fields, prefer Google OCR.
 
-For handwriting, visually inspect the original page.
+For handwritten handling units, visually inspect the original
+page image.
 
-Do not use Google OCR guesses about handwriting when the page
-image shows something different.
+Do not trust OCR guesses about handwriting when the page image
+shows something different.
 
 
 ============================================================
 MASTER SALES ORDER
 ============================================================
 
-The master ULP Sales Order normally looks like:
+The master ULP Sales Order has this format:
 
 SO-00325428
 
-Format:
+That is:
 
 SO-
 followed by exactly 8 digits.
 
-The master Sales Order is completely separate from SRP_number.
+The master Sales Order is separate from SRP_number.
 
-Examples of SRP numbers:
+Examples of SRP values:
 
 SO0316672
 S00316672
+GT# 6594008 ALTITUDE
 
-NEVER convert an SRP number into a master Sales Order.
+NEVER turn an SRP number into a master Sales Order.
 
-Do not add a hyphen to an SRP number.
-
-Python will independently validate and recover the master
-Sales Order from Google OCR, so do not invent one.
+Python independently validates the master Sales Order from
+Google OCR, so do not invent one.
 
 
 ============================================================
 PRINTED SHIPMENT FIELDS
 ============================================================
 
-Use the provided Google OCR text plus the page layout to extract:
+Extract:
 
 - customer_PO
 - SRP_number
@@ -350,26 +337,13 @@ Preserve printed values faithfully.
 
 
 ============================================================
-SHIP-TO / STREET ADDRESS
+SHIP-TO ADDRESS
 ============================================================
-
-Read the entire Ship To block.
 
 delivery_address should be the physical street-address line.
 
-Street addresses often look like:
-
-16777 FILLMORE ST
-3580 SOUTH 144TH STREET
-401 N FAIRVIEW AVE
-499 W ELM STREET
-1135 NM 554
-
-A street address normally begins with a building/street number
-followed by a street, highway, road, route, etc.
-
-Lines between the organization name and physical street address
-may belong in delivery_address2.
+Lines between the organization name and street address may
+belong in delivery_address2.
 
 Example:
 
@@ -404,192 +378,263 @@ delivery_zip =
 DELIVERY CONTACT
 ============================================================
 
-Prefer the printed field specifically labeled Delivery contact.
+Prefer the field specifically labeled Delivery contact.
 
-A person's name in the Ship To block is not automatically the
+A name in the Ship To block is not automatically the
 delivery contact.
 
 
 ============================================================
-HANDLING UNITS — PRIMARY GPT JOB
+HANDLING-UNIT TABLE — MOST IMPORTANT SECTION
 ============================================================
 
-Visually inspect the original page for EVERY genuine handwritten
-handling-unit / pallet / skid notation.
+Your job is NOT to normalize the handwritten handling units.
 
-Examples:
+Your first job is to TRANSCRIBE THE HANDWRITTEN TABLE ROW BY ROW.
 
-48 x 45 x 26 / 97# / B8
+Return EVERY genuine handwritten skid / handling-unit row in
+the exact visual TOP-TO-BOTTOM sequence in which it appears.
 
-74 x 45 x 55 / 542# / D24
+Use:
 
-48 x 48 x 17 / 88# / D19E
+row_index = 1
+row_index = 2
+row_index = 3
+...
 
-98 x 45 x ? / 294# / C21-2
+Do not reorder rows based on dimensions, weight, location,
+product, or anything else.
 
-Extract:
+Do not combine identical rows.
 
-- length
-- width
-- height
+Two physically separate skids may have exactly the same:
+
+- dimensions
 - weight
 - location
 
-Return the handwritten HUs in their actual TOP-TO-BOTTOM
-order on the page.
-
-Order matters because later handwritten rows may use ditto marks
-to repeat values from the HU immediately above.
+They are still TWO handling units and MUST be returned as two
+separate rows.
 
 
 ============================================================
-DITTO / QUOTATION MARKS — VERY IMPORTANT
+RAW DIMENSIONS
 ============================================================
 
-The shipper sometimes uses handwritten quotation marks, double
-quotes, pairs of short vertical strokes, or other ditto marks to
-mean:
+For an explicitly written dimension set, copy what you see into:
 
-    SAME AS THE HANDLING UNIT IMMEDIATELY ABOVE
+raw_dimensions
 
-These marks are intentional freight notation.
+Examples:
 
-Examples of possible ditto marks:
+79 x 32 x 32
+98 x 45 x 44
+48 x 48 x 17
+
+Do not normalize the numbers yourself.
+
+Python will parse raw_dimensions afterward.
+
+
+============================================================
+RAW WEIGHT
+============================================================
+
+Copy the handwritten weight into:
+
+raw_weight
+
+Examples:
+
+162#
+756#
+195
+242#
+
+The # symbol means pounds and may appear before or after the
+dimensions.
+
+Do not assume the first handwritten number is length.
+
+
+============================================================
+RAW LOCATION
+============================================================
+
+Copy the warehouse/location notation into:
+
+raw_location
+
+Examples:
+
+D19
+C17
+A23
+C26
+D21
+B21
+C-21-2
+A19-E
+
+
+============================================================
+DITTO / QUOTATION MARKS — CRITICAL
+============================================================
+
+The shipper may use handwritten quotation marks, double quotes,
+pairs of short strokes, or ditto marks to mean:
+
+SAME VALUE AS THE IMMEDIATELY PRECEDING HANDLING-UNIT ROW.
+
+Examples of possible marks:
 
 "
 ''
 〃
 
-They may be handwritten loosely and may not resemble perfect
-typographic quotation marks.
+The mark may be messy and may not look like a perfect
+typographic quotation mark.
 
-Interpret them based on their POSITION in the packing-list row.
+Interpret the mark according to the COLUMN / POSITION where
+it appears.
 
 
 ------------------------------------------------------------
 DIMENSION DITTO
 ------------------------------------------------------------
 
-If the dimension area contains ditto marks instead of newly
-written dimensions:
+If the dimension area contains quotation / ditto marks rather
+than a new dimension:
 
-    repeat_dimensions = true
+dimensions_are_ditto = true
+raw_dimensions = null
 
-and return:
+Do NOT fill in the previous dimensions yourself.
 
-    length = null
-    width = null
-    height = null
-
-Python will copy the dimensions from the immediately preceding
-valid HU.
-
-Example visually:
-
-79 x 32 x 32
-"
-"
-79 x 32 x 40
-"
-
-means:
-
-HU 1 = 79 x 32 x 32
-
-HU 2:
-repeat_dimensions = true
-
-HU 3:
-repeat_dimensions = true
-
-HU 4 = 79 x 32 x 40
-
-HU 5:
-repeat_dimensions = true
-
-The final resolved dimensions will therefore be:
-
-79 x 32 x 32
-79 x 32 x 32
-79 x 32 x 32
-79 x 32 x 40
-79 x 32 x 40
+Python will do that later.
 
 
 ------------------------------------------------------------
 WEIGHT DITTO
 ------------------------------------------------------------
 
-If the WEIGHT position contains ditto marks instead of a newly
-written weight:
+If the weight area contains a quotation / ditto mark:
 
-    repeat_weight = true
-
-and:
-
-    weight = null
-
-Do NOT copy the number yourself.
-
-Python will inherit the previous HU's weight.
+weight_is_ditto = true
+raw_weight = null
 
 
 ------------------------------------------------------------
 LOCATION DITTO
 ------------------------------------------------------------
 
-If the LOCATION position contains ditto marks instead of a newly
-written warehouse location:
+If the location area contains a quotation / ditto mark:
 
-    repeat_location = true
-
-and:
-
-    location = null
-
-Python will inherit the previous HU's location.
+location_is_ditto = true
+raw_location = null
 
 
 ------------------------------------------------------------
-FIELD-SPECIFIC DITTO
+DITTO MARKS ARE FIELD-SPECIFIC
 ------------------------------------------------------------
 
-Ditto marks are FIELD-SPECIFIC.
+A ditto in dimensions repeats dimensions only.
 
-A quote mark in the dimension area repeats dimensions only.
+A ditto in weight repeats weight only.
 
-A quote mark in the weight area repeats weight only.
-
-A quote mark in the location area repeats location only.
-
-Do NOT assume the entire row repeats just because one field
-contains a ditto mark.
+A ditto in location repeats location only.
 
 Example:
 
-"
-167#
-C17
+dimension area: "
+weight: 167
+location: C17
 
-may mean:
+return:
 
-repeat_dimensions = true
-weight = 167
-location = C17
+raw_dimensions = null
+dimensions_are_ditto = true
 
-It does NOT mean the previous weight or location should also
-be repeated.
+raw_weight = "167"
+weight_is_ditto = false
+
+raw_location = "C17"
+location_is_ditto = false
 
 
-------------------------------------------------------------
-NEW EXPLICIT VALUE RESETS THE CARRY-FORWARD VALUE
-------------------------------------------------------------
+============================================================
+PAGE-5 STYLE EXAMPLE
+============================================================
 
-If several rows repeat dimensions and then a new explicit
-dimension is written, that new dimension becomes the value
-subsequent ditto rows inherit.
+Suppose the handwritten page visually means:
 
-Example:
+79 x 32 x 32   162   D19
+"              162   D19
+"              164   D20
+"              167   C17
+"              165   A23
+"              164   C26
+79 x 32 x 40   192   D21
+"              195   B21
+
+You MUST return EIGHT raw rows in exactly that order.
+
+Row 1:
+raw_dimensions = "79 x 32 x 32"
+dimensions_are_ditto = false
+raw_weight = "162"
+raw_location = "D19"
+
+Row 2:
+raw_dimensions = null
+dimensions_are_ditto = true
+raw_weight = "162"
+raw_location = "D19"
+
+Row 3:
+raw_dimensions = null
+dimensions_are_ditto = true
+raw_weight = "164"
+raw_location = "D20"
+
+Row 4:
+raw_dimensions = null
+dimensions_are_ditto = true
+raw_weight = "167"
+raw_location = "C17"
+
+Row 5:
+raw_dimensions = null
+dimensions_are_ditto = true
+raw_weight = "165"
+raw_location = "A23"
+
+Row 6:
+raw_dimensions = null
+dimensions_are_ditto = true
+raw_weight = "164"
+raw_location = "C26"
+
+Row 7:
+raw_dimensions = "79 x 32 x 40"
+dimensions_are_ditto = false
+raw_weight = "192"
+raw_location = "D21"
+
+Row 8:
+raw_dimensions = null
+dimensions_are_ditto = true
+raw_weight = "195"
+raw_location = "B21"
+
+Python will later resolve the repeated dimensions.
+
+
+============================================================
+NEW EXPLICIT VALUE RESETS THE DITTO CHAIN
+============================================================
+
+If the page says:
 
 79 x 32 x 32
 "
@@ -597,7 +642,7 @@ Example:
 79 x 32 x 40
 "
 
-resolves to:
+then the final interpreted sequence is:
 
 79 x 32 x 32
 79 x 32 x 32
@@ -605,178 +650,59 @@ resolves to:
 79 x 32 x 40
 79 x 32 x 40
 
+But YOU should return the RAW rows and the ditto flags.
 
-------------------------------------------------------------
+Do not perform that inheritance yourself.
+
+
+============================================================
 NO BACKWARD INFERENCE
-------------------------------------------------------------
+============================================================
 
-Ditto marks may ONLY refer to the immediately preceding genuine
-HU above them.
+A ditto may only refer to the handling-unit row immediately
+above it.
 
 Never use a later row to fill an earlier row.
 
-Never carry a ditto value across a different shipment.
-
-Never invent a preceding value if no valid preceding HU exists.
-
-If a mark looks like a ditto but there is no preceding HU,
-leave the affected value null and set uncertain=true.
+Never invent a value when it is not visible.
 
 
 ============================================================
-DIMENSION / WEIGHT RULES
+DO NOT DEDUPLICATE
 ============================================================
 
-Dimensions normally appear:
+This is extremely important.
 
-L x W x H
-
-Typical lengths include:
-
-48
-72
-74
-79
-96
-98
-120
-144
-
-Typical widths include:
-
-40
-42
-44
-45
-48
-
-These are clues only.
-
-Do not force a common dimension if the handwriting says
-something else.
-
-The # symbol normally means pounds.
+If two rows are visually separate but contain identical values,
+return both rows.
 
 Example:
 
-756# = 756 pounds
+79 x 32 x 32 / 162 / D19
+79 x 32 x 32 / 162 / D19
 
-Do not interpret:
+must result in TWO rows.
 
-48 x 44 / 756# / C27
-
-as:
-
-48 x 44 x 756
-
-Correct interpretation is approximately:
-
-length = 48
-width = 44
-height = null
-weight = 756
-location = C27
+They represent two physical skids.
 
 
 ============================================================
-WEIGHT POSITION — IMPORTANT
+DO NOT CREATE FAKE ROWS
 ============================================================
 
-The handwritten weight may appear BEFORE or AFTER the dimensions.
-
-Do NOT assume the first handwritten number is length.
-
-The # symbol strongly indicates weight regardless of where
-the number appears in the handwritten sequence.
-
-Example:
-
-242#   48 x 48 x 20   A19-E
-
-means:
-
-weight = 242
-length = 48
-width = 48
-height = 20
-location = A19-E
-
-Example:
-
-48 x 48 x 17   88#   D19E
-
-means:
-
-length = 48
-width = 48
-height = 17
-weight = 88
-location = D19E
-
-Before assigning L/W/H:
-
-1. Identify any value marked with # as weight.
-2. Remove the weight value from consideration as a dimension.
-3. Interpret the remaining dimensional sequence as L x W x H.
-
-Weight position is not fixed.
-
-
-============================================================
-AMBIGUOUS HANDWRITING
-============================================================
-
-Be careful with:
-
-19 vs 91
-17 vs 71
-14 vs 41
-78 vs 98
-
-If genuinely ambiguous:
-
-- return the most likely visible value
-- set uncertain=true
-- explain briefly in notes
-
-Do not make up a missing value.
-
-
-============================================================
-DO NOT CREATE FAKE HANDLING UNITS
-============================================================
-
-Do not create HUs from:
+Do not create handling-unit rows from:
 
 - signatures
 - initials
-- check marks
-- isolated numbers
-- lone warehouse locations
-- printed product measurements
-- catalog measurements
+- random marks
+- printed product dimensions
+- catalog dimensions
 - quantities
+- lone numbers unrelated to a skid row
 
-A real HU may still have one missing field.
+A genuine row may have a missing value.
 
-Example:
-
-98 x 45 x ? / 294# / C21-2
-
-is a real HU:
-
-length = 98
-width = 45
-height = null
-weight = 294
-location = C21-2
-uncertain = true
-
-
-A row containing ditto marks CAN be a genuine HU even when
-length/width/height or another field is null in the raw output.
-
-Use the repeat_* flags to preserve such rows for Python.
+Preserve it and set uncertain=true if appropriate.
 
 
 ============================================================
@@ -786,19 +712,18 @@ FINAL CHECK
 Before responding:
 
 1. Keep SRP separate from master Sales Order.
-2. Use Google OCR for printed fields.
+2. Use Google OCR for printed information.
 3. Use the page image for handwriting.
-4. Identify the actual physical street address.
-5. Preserve relevant Address 2 lines.
-6. Find every real handwritten HU.
-7. Preserve the visual TOP-TO-BOTTOM order of the HUs.
-8. Recognize handwritten quotation / ditto marks.
-9. Set the appropriate repeat_dimensions, repeat_weight, or
-   repeat_location flag instead of guessing the inherited value.
-10. Identify values marked with # as weight regardless of position.
-11. Only after identifying weight, assign L/W/H.
-12. Do not confuse weight with height.
-13. Do not use printed product dimensions as HU dimensions.
+4. Return every genuine handwritten skid row.
+5. Preserve exact top-to-bottom row order.
+6. Never deduplicate physically separate rows.
+7. Recognize ditto marks by their column position.
+8. Set field-specific ditto flags.
+9. Do not resolve ditto values yourself.
+10. Preserve explicit handwritten weight values.
+11. Preserve explicit handwritten locations.
+12. Weight may occur before or after dimensions.
+13. Do not use printed product dimensions as skid dimensions.
 """
 
 
@@ -876,8 +801,36 @@ def _first_nonempty(
     return incoming
 
 
+def _append_note(
+    hu: Dict[str, Any],
+    note: str,
+):
+
+    existing = _clean_string(
+        hu.get(
+            "notes"
+        )
+    )
+
+    if existing:
+
+        hu[
+            "notes"
+        ] = (
+            existing
+            + " "
+            + note
+        )
+
+    else:
+
+        hu[
+            "notes"
+        ] = note
+
+
 # ==========================================================
-# MASTER SALES ORDER VALIDATION
+# MASTER SALES ORDER
 # ==========================================================
 
 def _validate_sales_order(
@@ -901,10 +854,6 @@ def _validate_sales_order(
     return value
 
 
-# ==========================================================
-# GOOGLE OCR SALES ORDER EXTRACTION
-# ==========================================================
-
 def _extract_sales_order_from_ocr(
     page_text: str,
 ) -> Optional[str]:
@@ -923,8 +872,6 @@ def _extract_sales_order_from_ocr(
         if line.strip()
     ]
 
-    # First preference:
-    # literal Sales order field.
     for i, line in enumerate(
         lines
     ):
@@ -935,68 +882,79 @@ def _extract_sales_order_from_ocr(
             line,
         ).strip().lower()
 
-        compact = normalized_label.replace(
-            " ",
-            ""
+        compact = (
+            normalized_label
+            .replace(
+                " ",
+                ""
+            )
         )
 
         if (
-            "sales order" not in normalized_label
-            and "salesorder" not in compact
+            "sales order"
+            not in normalized_label
+
+            and "salesorder"
+            not in compact
         ):
             continue
 
-        nearby_lines = lines[
-            i:min(
-                i + 4,
-                len(lines)
-            )
-        ]
-
-        nearby_text = "\n".join(
-            nearby_lines
+        nearby = "\n".join(
+            lines[
+                i:min(
+                    i + 4,
+                    len(lines),
+                )
+            ]
         )
 
-        match = SALES_ORDER_SEARCH_PATTERN.search(
-            nearby_text
+        match = (
+            SALES_ORDER_SEARCH_PATTERN
+            .search(
+                nearby
+            )
         )
 
         if match:
 
-            return _validate_sales_order(
-                match.group(0)
+            return (
+                _validate_sales_order(
+                    match.group(0)
+                )
             )
 
-    # Conservative fallback:
-    # exactly one valid SO-######## anywhere on page.
-    matches = SALES_ORDER_SEARCH_PATTERN.findall(
-        page_text
+    matches = (
+        SALES_ORDER_SEARCH_PATTERN
+        .findall(
+            page_text
+        )
     )
 
-    unique_matches = []
+    unique = []
+
     seen = set()
 
     for match in matches:
 
-        normalized = match.upper()
+        value = (
+            match.upper()
+        )
 
-        if normalized in seen:
+        if value in seen:
             continue
 
         seen.add(
-            normalized
+            value
         )
 
-        unique_matches.append(
-            normalized
+        unique.append(
+            value
         )
 
-    if len(
-        unique_matches
-    ) == 1:
+    if len(unique) == 1:
 
         return _validate_sales_order(
-            unique_matches[0]
+            unique[0]
         )
 
     return None
@@ -1088,7 +1046,348 @@ def _build_ocr_page_map(
 
 
 # ==========================================================
-# HANDLING UNIT HELPERS
+# RAW HU PARSING
+# ==========================================================
+
+def _parse_number(
+    value: Any,
+) -> Optional[float]:
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        (int, float),
+    ):
+
+        return value
+
+    text = str(
+        value
+    ).strip()
+
+    match = re.search(
+        r"\d+(?:\.\d+)?",
+        text,
+    )
+
+    if not match:
+        return None
+
+    number = float(
+        match.group(0)
+    )
+
+    if number.is_integer():
+        return int(
+            number
+        )
+
+    return number
+
+
+def _parse_dimensions(
+    raw_dimensions: Any,
+):
+
+    text = _clean_string(
+        raw_dimensions
+    )
+
+    if not text:
+
+        return (
+            None,
+            None,
+            None,
+        )
+
+    numbers = re.findall(
+        r"\d+(?:\.\d+)?",
+        text,
+    )
+
+    parsed = []
+
+    for value in numbers[:3]:
+
+        number = float(
+            value
+        )
+
+        if number.is_integer():
+
+            number = int(
+                number
+            )
+
+        parsed.append(
+            number
+        )
+
+    while len(parsed) < 3:
+
+        parsed.append(
+            None
+        )
+
+    return (
+        parsed[0],
+        parsed[1],
+        parsed[2],
+    )
+
+
+def _parse_location(
+    raw_location: Any,
+) -> Optional[str]:
+
+    return _clean_string(
+        raw_location
+    )
+
+
+# ==========================================================
+# RESOLVE RAW ROWS + DITTO MARKS
+# ==========================================================
+
+def _resolve_handling_unit_rows(
+    raw_rows: List[Dict[str, Any]],
+    page_number: int,
+) -> List[Dict[str, Any]]:
+    """
+    Convert GPT's visual transcription into actual HUs.
+
+    Rules:
+    - preserve every physical row
+    - sort by explicit visual row_index
+    - resolve ditto marks sequentially
+    - new explicit values reset the inherited value
+    - inheritance never crosses pages
+    """
+
+    rows = [
+        row
+        for row in raw_rows
+        if isinstance(
+            row,
+            dict,
+        )
+    ]
+
+    rows.sort(
+        key=lambda row: (
+            row.get(
+                "row_index",
+                999999,
+            )
+        )
+    )
+
+    resolved = []
+
+    previous = None
+
+    for raw_row in rows:
+
+        hu = {
+            "length":
+                None,
+
+            "width":
+                None,
+
+            "height":
+                None,
+
+            "weight":
+                None,
+
+            "location":
+                None,
+
+            "uncertain":
+                bool(
+                    raw_row.get(
+                        "uncertain",
+                        False,
+                    )
+                ),
+
+            "notes":
+                _clean_string(
+                    raw_row.get(
+                        "notes"
+                    )
+                ),
+
+            "page":
+                page_number,
+
+            "row_index":
+                raw_row.get(
+                    "row_index"
+                ),
+        }
+
+        # --------------------------------------------------
+        # DIMENSIONS
+        # --------------------------------------------------
+
+        if bool(
+            raw_row.get(
+                "dimensions_are_ditto",
+                False,
+            )
+        ):
+
+            if previous is not None:
+
+                hu[
+                    "length"
+                ] = previous.get(
+                    "length"
+                )
+
+                hu[
+                    "width"
+                ] = previous.get(
+                    "width"
+                )
+
+                hu[
+                    "height"
+                ] = previous.get(
+                    "height"
+                )
+
+            else:
+
+                hu[
+                    "uncertain"
+                ] = True
+
+                _append_note(
+                    hu,
+                    (
+                        "Dimension ditto could not be resolved "
+                        "because no preceding HU exists on page."
+                    ),
+                )
+
+        else:
+
+            (
+                hu["length"],
+                hu["width"],
+                hu["height"],
+            ) = _parse_dimensions(
+                raw_row.get(
+                    "raw_dimensions"
+                )
+            )
+
+        # --------------------------------------------------
+        # WEIGHT
+        # --------------------------------------------------
+
+        if bool(
+            raw_row.get(
+                "weight_is_ditto",
+                False,
+            )
+        ):
+
+            if previous is not None:
+
+                hu[
+                    "weight"
+                ] = previous.get(
+                    "weight"
+                )
+
+            else:
+
+                hu[
+                    "uncertain"
+                ] = True
+
+                _append_note(
+                    hu,
+                    (
+                        "Weight ditto could not be resolved "
+                        "because no preceding HU exists on page."
+                    ),
+                )
+
+        else:
+
+            hu[
+                "weight"
+            ] = _parse_number(
+                raw_row.get(
+                    "raw_weight"
+                )
+            )
+
+        # --------------------------------------------------
+        # LOCATION
+        # --------------------------------------------------
+
+        if bool(
+            raw_row.get(
+                "location_is_ditto",
+                False,
+            )
+        ):
+
+            if previous is not None:
+
+                hu[
+                    "location"
+                ] = previous.get(
+                    "location"
+                )
+
+            else:
+
+                hu[
+                    "uncertain"
+                ] = True
+
+                _append_note(
+                    hu,
+                    (
+                        "Location ditto could not be resolved "
+                        "because no preceding HU exists on page."
+                    ),
+                )
+
+        else:
+
+            hu[
+                "location"
+            ] = _parse_location(
+                raw_row.get(
+                    "raw_location"
+                )
+            )
+
+        resolved.append(
+            hu
+        )
+
+        # IMPORTANT:
+        # Every resolved physical row becomes the source of
+        # inheritance for the next visual row.
+        previous = hu
+
+    return resolved
+
+
+# ==========================================================
+# HU PLAUSIBILITY / REPAIR
 # ==========================================================
 
 def _count_dimensions(
@@ -1108,235 +1407,8 @@ def _count_dimensions(
     )
 
 
-def _append_note(
-    hu: Dict[str, Any],
-    note: str,
-):
-
-    existing = _clean_string(
-        hu.get(
-            "notes"
-        )
-    )
-
-    if existing:
-
-        hu[
-            "notes"
-        ] = (
-            existing
-            + " "
-            + note
-        )
-
-    else:
-
-        hu[
-            "notes"
-        ] = note
-
-
-# ==========================================================
-# DITTO / CARRY-FORWARD RESOLUTION
-# ==========================================================
-
-def _resolve_ditto_handling_units(
-    handling_units: List[Dict[str, Any]],
-    page_number: int,
-) -> List[Dict[str, Any]]:
-    """
-    Resolve handwritten ditto marks sequentially.
-
-    IMPORTANT:
-
-    - inheritance is from the immediately previous genuine HU
-    - inheritance is field-specific
-    - a new explicit value automatically becomes the value
-      inherited by later ditto rows
-    - nothing is carried across pages because this function is
-      called separately for every page
-    """
-
-    resolved: List[
-        Dict[str, Any]
-    ] = []
-
-    previous: Optional[
-        Dict[str, Any]
-    ] = None
-
-    for raw_hu in handling_units:
-
-        if not isinstance(
-            raw_hu,
-            dict,
-        ):
-            continue
-
-        hu = dict(
-            raw_hu
-        )
-
-        hu[
-            "page"
-        ] = page_number
-
-        repeat_dimensions = bool(
-            hu.get(
-                "repeat_dimensions",
-                False,
-            )
-        )
-
-        repeat_weight = bool(
-            hu.get(
-                "repeat_weight",
-                False,
-            )
-        )
-
-        repeat_location = bool(
-            hu.get(
-                "repeat_location",
-                False,
-            )
-        )
-
-        # --------------------------------------------------
-        # DIMENSIONS
-        # --------------------------------------------------
-
-        if repeat_dimensions:
-
-            if previous is not None:
-
-                hu[
-                    "length"
-                ] = previous.get(
-                    "length"
-                )
-
-                hu[
-                    "width"
-                ] = previous.get(
-                    "width"
-                )
-
-                hu[
-                    "height"
-                ] = previous.get(
-                    "height"
-                )
-
-            else:
-
-                hu[
-                    "uncertain"
-                ] = True
-
-                _append_note(
-                    hu,
-                    (
-                        "Dimension ditto mark could not be "
-                        "resolved because there was no preceding "
-                        "handling unit on this page."
-                    ),
-                )
-
-        # --------------------------------------------------
-        # WEIGHT
-        # --------------------------------------------------
-
-        if repeat_weight:
-
-            if previous is not None:
-
-                hu[
-                    "weight"
-                ] = previous.get(
-                    "weight"
-                )
-
-            else:
-
-                hu[
-                    "uncertain"
-                ] = True
-
-                _append_note(
-                    hu,
-                    (
-                        "Weight ditto mark could not be resolved "
-                        "because there was no preceding handling "
-                        "unit on this page."
-                    ),
-                )
-
-        # --------------------------------------------------
-        # LOCATION
-        # --------------------------------------------------
-
-        if repeat_location:
-
-            if previous is not None:
-
-                hu[
-                    "location"
-                ] = previous.get(
-                    "location"
-                )
-
-            else:
-
-                hu[
-                    "uncertain"
-                ] = True
-
-                _append_note(
-                    hu,
-                    (
-                        "Location ditto mark could not be resolved "
-                        "because there was no preceding handling "
-                        "unit on this page."
-                    ),
-                )
-
-        # Remove internal ditto flags before downstream output.
-        #
-        # They are extraction-control metadata, not business
-        # fields needed by the Sheet.
-        hu.pop(
-            "repeat_dimensions",
-            None,
-        )
-
-        hu.pop(
-            "repeat_weight",
-            None,
-        )
-
-        hu.pop(
-            "repeat_location",
-            None,
-        )
-
-        resolved.append(
-            hu
-        )
-
-        # The newly resolved HU becomes the source for the next
-        # row's ditto marks.
-        previous = hu
-
-    return resolved
-
-
-# ==========================================================
-# HANDLING UNIT REPAIR / PLAUSIBILITY
-# ==========================================================
-
 def _repair_handling_unit(
-    hu: Dict[str, Any]
+    hu: Dict[str, Any],
 ) -> Dict[str, Any]:
 
     length = hu.get(
@@ -1361,10 +1433,7 @@ def _repair_handling_unit(
         )
     )
 
-    # ------------------------------------------------------
-    # LARGE HEIGHT THAT IS PROBABLY WEIGHT
-    # ------------------------------------------------------
-
+    # Large height that is probably actually weight.
     if (
         height is not None
         and height >= 240
@@ -1389,9 +1458,7 @@ def _repair_handling_unit(
             hu,
             (
                 f"Automatic plausibility correction: "
-                f"{height} was extracted as height but "
-                f"is more plausible as weight. "
-                f"Height left blank for review."
+                f"{height} interpreted as weight rather than height."
             ),
         )
 
@@ -1403,10 +1470,7 @@ def _repair_handling_unit(
         "weight"
     )
 
-    # ------------------------------------------------------
-    # POSSIBLE 756 -> 75 + 6 SPLIT
-    # ------------------------------------------------------
-
+    # Previous ambiguous split protection.
     if (
         uncertain
         and height is not None
@@ -1414,9 +1478,6 @@ def _repair_handling_unit(
         and weight is not None
         and 0 < weight <= 10
     ):
-
-        bad_height = height
-        bad_weight = weight
 
         hu[
             "height"
@@ -1432,95 +1493,10 @@ def _repair_handling_unit(
 
         _append_note(
             hu,
-            (
-                f"Possible handwritten number split: "
-                f"height={bad_height}, weight={bad_weight}. "
-                f"Both values left blank for review."
-            ),
+            "Possible split handwritten number; height and weight left blank.",
         )
 
-    height = hu.get(
-        "height"
-    )
-
-    weight = hu.get(
-        "weight"
-    )
-
-    # ------------------------------------------------------
-    # QUESTIONABLE TALL HEIGHT
-    # ------------------------------------------------------
-
-    if (
-        bool(
-            hu.get(
-                "uncertain"
-            )
-        )
-        and height is not None
-        and 60 <= height <= 120
-        and weight is not None
-        and weight >= 100
-    ):
-
-        note_text = (
-            _clean_string(
-                hu.get(
-                    "notes"
-                )
-            )
-            or ""
-        ).lower()
-
-        height_is_described_unclear = (
-
-            "height is not clearly" in note_text
-
-            or "height is unclear" in note_text
-
-            or "height is not legible" in note_text
-
-            or "height is unreadable" in note_text
-
-            or "height is not visible" in note_text
-
-            or (
-                "height" in note_text
-                and "unclear" in note_text
-            )
-
-            or (
-                "height" in note_text
-                and "not visible" in note_text
-            )
-        )
-
-        if height_is_described_unclear:
-
-            questionable_height = height
-
-            hu[
-                "height"
-            ] = None
-
-            hu[
-                "uncertain"
-            ] = True
-
-            _append_note(
-                hu,
-                (
-                    f"Height {questionable_height} was removed "
-                    f"because the visual extraction identified "
-                    f"the height as unclear while weight "
-                    f"{weight} was independently identified."
-                ),
-            )
-
-    # ------------------------------------------------------
-    # EXTREME DIMENSIONS
-    # ------------------------------------------------------
-
+    # Mark extreme dimensions as uncertain.
     for field in [
         "length",
         "width",
@@ -1543,8 +1519,8 @@ def _repair_handling_unit(
             _append_note(
                 hu,
                 (
-                    f"{field}={value} is outside "
-                    f"normal ULP handling-unit range."
+                    f"{field}={value} is outside normal "
+                    f"ULP handling-unit range."
                 ),
             )
 
@@ -1573,7 +1549,7 @@ def _repair_handling_unit(
 
 
 def _partial_dimensions_are_plausible(
-    hu: Dict[str, Any]
+    hu: Dict[str, Any],
 ) -> bool:
 
     length = hu.get(
@@ -1608,18 +1584,13 @@ def _partial_dimensions_are_plausible(
 
 
 def _handling_unit_has_real_data(
-    hu: Dict[str, Any]
+    hu: Dict[str, Any],
 ) -> bool:
-    """
-    Reject weak handwritten fragments while keeping genuine
-    complete or incomplete freight HUs.
 
-    Ditto rows have already been resolved before this function
-    executes.
-    """
-
-    dimension_count = _count_dimensions(
-        hu
+    dimension_count = (
+        _count_dimensions(
+            hu
+        )
     )
 
     length = hu.get(
@@ -1662,14 +1633,7 @@ def _handling_unit_has_real_data(
         if value is not None
     ]
 
-    # ------------------------------------------------------
-    # GREAT NECK-STYLE WEAK FRAGMENT
-    #
-    # Example:
-    #
-    # 2 / 20#
-    # ------------------------------------------------------
-
+    # Great Neck weak-fragment protection.
     if (
         dimension_count <= 2
         and dimensional_values
@@ -1680,17 +1644,9 @@ def _handling_unit_has_real_data(
 
         return False
 
-    # ------------------------------------------------------
-    # COMPLETE L x W x H
-    # ------------------------------------------------------
-
     if dimension_count >= 3:
 
         return True
-
-    # ------------------------------------------------------
-    # TWO PLAUSIBLE DIMENSIONS + WEIGHT
-    # ------------------------------------------------------
 
     if (
         dimension_count >= 2
@@ -1702,10 +1658,6 @@ def _handling_unit_has_real_data(
 
         return True
 
-    # ------------------------------------------------------
-    # TWO PLAUSIBLE DIMENSIONS + LOCATION
-    # ------------------------------------------------------
-
     if (
         dimension_count >= 2
         and has_location
@@ -1715,10 +1667,6 @@ def _handling_unit_has_real_data(
     ):
 
         return True
-
-    # ------------------------------------------------------
-    # ONE DIMENSION + WEIGHT + LOCATION
-    # ------------------------------------------------------
 
     if (
         dimension_count == 1
@@ -1749,39 +1697,6 @@ def _handling_unit_has_real_data(
     return False
 
 
-def _handling_unit_key(
-    hu: Dict[str, Any]
-):
-
-    return (
-        hu.get(
-            "page"
-        ),
-
-        hu.get(
-            "length"
-        ),
-
-        hu.get(
-            "width"
-        ),
-
-        hu.get(
-            "height"
-        ),
-
-        hu.get(
-            "weight"
-        ),
-
-        _normalize_compare_string(
-            hu.get(
-                "location"
-            )
-        ),
-    )
-
-
 # ==========================================================
 # GPT PAGE EXTRACTION
 # ==========================================================
@@ -1802,13 +1717,14 @@ def _extract_page_with_gpt(
         )
 
         pdf_file.name = (
-            f"ulp_page_"
-            f"{original_page_number}.pdf"
+            f"ulp_page_{original_page_number}.pdf"
         )
 
-        uploaded_file = client.files.create(
-            file=pdf_file,
-            purpose="user_data",
+        uploaded_file = (
+            client.files.create(
+                file=pdf_file,
+                purpose="user_data",
+            )
         )
 
         uploaded_file_id = (
@@ -1855,7 +1771,8 @@ def _extract_page_with_gpt(
             text={
                 "format": {
 
-                    "type": "json_schema",
+                    "type":
+                        "json_schema",
 
                     "name":
                         "ulp_pink_page_extraction",
@@ -1904,33 +1821,31 @@ def _extract_page_with_gpt(
         ] = original_page_number
 
         # ==================================================
-        # DITTO RESOLUTION MUST HAPPEN FIRST
+        # RAW ROWS -> RESOLVED HUs
         # ==================================================
 
-        raw_hus = (
+        raw_rows = (
             page_result.get(
-                "handling_units"
+                "handling_unit_rows"
             )
             or []
         )
 
         resolved_hus = (
-            _resolve_ditto_handling_units(
-                raw_hus,
+            _resolve_handling_unit_rows(
+                raw_rows,
                 original_page_number,
             )
         )
-
-        # ==================================================
-        # THEN REPAIR / VALIDATE
-        # ==================================================
 
         cleaned_hus = []
 
         for hu in resolved_hus:
 
-            hu = _repair_handling_unit(
-                hu
+            hu = (
+                _repair_handling_unit(
+                    hu
+                )
             )
 
             if _handling_unit_has_real_data(
@@ -1941,12 +1856,24 @@ def _extract_page_with_gpt(
                     hu
                 )
 
+        # Downstream contract stays unchanged.
         page_result[
             "handling_units"
         ] = cleaned_hus
 
+        # Keep raw transcription in debug page result.
+        page_result[
+            "raw_handling_unit_rows"
+        ] = raw_rows
+
+        # Remove schema-only original key.
+        page_result.pop(
+            "handling_unit_rows",
+            None,
+        )
+
         # ==================================================
-        # TOKEN USAGE
+        # USAGE
         # ==================================================
 
         usage = {
@@ -1999,7 +1926,6 @@ def _extract_page_with_gpt(
                 )
 
             except Exception:
-
                 pass
 
 
@@ -2022,7 +1948,6 @@ def _page_similarity_score(
             "customer_PO"
         ),
     ):
-
         score += 12
 
     if _field_matches(
@@ -2033,7 +1958,6 @@ def _page_similarity_score(
             "delivery_zip"
         ),
     ):
-
         score += 6
 
     if _field_matches(
@@ -2044,7 +1968,6 @@ def _page_similarity_score(
             "delivery_name"
         ),
     ):
-
         score += 5
 
     if _field_matches(
@@ -2055,7 +1978,6 @@ def _page_similarity_score(
             "delivery_address"
         ),
     ):
-
         score += 5
 
     if _field_matches(
@@ -2066,7 +1988,6 @@ def _page_similarity_score(
             "delivery_city"
         ),
     ):
-
         score += 2
 
     if _field_matches(
@@ -2077,14 +1998,13 @@ def _page_similarity_score(
             "delivery_state"
         ),
     ):
-
         score += 1
 
     return score
 
 
 # ==========================================================
-# SHIPMENT GROUPS
+# SHIPMENT GROUPING
 # ==========================================================
 
 SHIPMENT_FIELDS = [
@@ -2103,7 +2023,6 @@ SHIPMENT_FIELDS = [
 def _new_shipment_group():
 
     return {
-
         "sales_order":
             None,
 
@@ -2146,6 +2065,13 @@ def _merge_page_into_group(
     group: Dict[str, Any],
     page: Dict[str, Any],
 ):
+    """
+    IMPORTANT:
+    We intentionally DO NOT deduplicate handling units.
+
+    Two separate physical skids are allowed to have identical
+    dimensions, weight and location.
+    """
 
     page_number = page.get(
         "page"
@@ -2164,9 +2090,11 @@ def _merge_page_into_group(
             page_number
         )
 
-    page_so = _validate_sales_order(
-        page.get(
-            "sales_order"
+    page_so = (
+        _validate_sales_order(
+            page.get(
+                "sales_order"
+            )
         )
     )
 
@@ -2194,15 +2122,6 @@ def _merge_page_into_group(
             ),
         )
 
-    existing_keys = {
-        _handling_unit_key(
-            hu
-        )
-        for hu in group[
-            "handling_units"
-        ]
-    }
-
     for hu in (
         page.get(
             "handling_units"
@@ -2210,21 +2129,10 @@ def _merge_page_into_group(
         or []
     ):
 
-        key = _handling_unit_key(
-            hu
-        )
-
-        if key in existing_keys:
-            continue
-
         group[
             "handling_units"
         ].append(
             hu
-        )
-
-        existing_keys.add(
-            key
         )
 
 
@@ -2246,15 +2154,19 @@ def _should_start_new_group(
 
         return False
 
-    current_so = _validate_sales_order(
-        current_page.get(
-            "sales_order"
+    current_so = (
+        _validate_sales_order(
+            current_page.get(
+                "sales_order"
+            )
         )
     )
 
-    group_so = _validate_sales_order(
-        current_group.get(
-            "sales_order"
+    group_so = (
+        _validate_sales_order(
+            current_group.get(
+                "sales_order"
+            )
         )
     )
 
@@ -2289,7 +2201,6 @@ def _should_start_new_group(
         return True
 
     has_identity = any(
-
         _clean_string(
             current_page.get(
                 field
@@ -2316,11 +2227,10 @@ def _should_start_new_group(
 # ==========================================================
 
 def _group_has_identity(
-    group: Dict[str, Any]
+    group: Dict[str, Any],
 ) -> bool:
 
     return any(
-
         _clean_string(
             group.get(
                 field
@@ -2337,7 +2247,7 @@ def _group_has_identity(
 
 
 def _group_is_so_only_or_packing_list(
-    group: Dict[str, Any]
+    group: Dict[str, Any],
 ) -> bool:
 
     if not _validate_sales_order(
@@ -2345,11 +2255,9 @@ def _group_is_so_only_or_packing_list(
             "sales_order"
         )
     ):
-
         return False
 
     identity_count = sum(
-
         1
 
         for field in [
@@ -2384,7 +2292,6 @@ def _groups_are_adjacent(
             "pages"
         )
     ):
-
         return False
 
     return (
@@ -2407,6 +2314,9 @@ def _merge_group_into_group(
     target: Dict[str, Any],
     source: Dict[str, Any],
 ):
+    """
+    Also intentionally preserves duplicate physical HUs.
+    """
 
     for page in (
         source.get(
@@ -2425,9 +2335,11 @@ def _merge_group_into_group(
                 page
             )
 
-    source_so = _validate_sales_order(
-        source.get(
-            "sales_order"
+    source_so = (
+        _validate_sales_order(
+            source.get(
+                "sales_order"
+            )
         )
     )
 
@@ -2455,17 +2367,6 @@ def _merge_group_into_group(
             ),
         )
 
-    existing_keys = {
-
-        _handling_unit_key(
-            hu
-        )
-
-        for hu in target[
-            "handling_units"
-        ]
-    }
-
     for hu in (
         source.get(
             "handling_units"
@@ -2473,29 +2374,17 @@ def _merge_group_into_group(
         or []
     ):
 
-        key = _handling_unit_key(
-            hu
-        )
-
-        if key in existing_keys:
-
-            continue
-
         target[
             "handling_units"
         ].append(
             hu
         )
 
-        existing_keys.add(
-            key
-        )
-
 
 def _backward_stitch_sales_orders(
     groups: List[
         Dict[str, Any]
-    ]
+    ],
 ) -> List[
     Dict[str, Any]
 ]:
@@ -2582,7 +2471,7 @@ def _backward_stitch_sales_orders(
 def _group_pages_into_shipments(
     page_results: List[
         Dict[str, Any]
-    ]
+    ],
 ) -> List[
     Dict[str, Any]
 ]:
@@ -2648,17 +2537,19 @@ def _group_pages_into_shipments(
             )
         )
 
+        # Preserve page first, then physical row order.
         group[
             "handling_units"
         ].sort(
             key=lambda hu: (
                 hu.get(
-                    "page"
-                )
-                if hu.get(
-                    "page"
-                ) is not None
-                else 999999
+                    "page",
+                    999999,
+                ),
+                hu.get(
+                    "row_index",
+                    999999,
+                ),
             )
         )
 
@@ -2670,7 +2561,7 @@ def _group_pages_into_shipments(
 # ==========================================================
 
 def extract_ulp_with_gpt(
-    pdf_bytes: bytes
+    pdf_bytes: bytes,
 ):
 
     if not pdf_bytes:
@@ -2718,7 +2609,6 @@ def extract_ulp_with_gpt(
     page_debug = []
 
     total_usage = {
-
         "input_tokens":
             0,
 
@@ -2789,7 +2679,6 @@ def extract_ulp_with_gpt(
             )
         )
 
-        # Google printed OCR wins.
         final_sales_order = (
             google_sales_order
             or gpt_sales_order
@@ -2835,14 +2724,14 @@ def extract_ulp_with_gpt(
             "gpt_sales_order":
                 gpt_sales_order,
 
-            "SRP_number":
-                page_result.get(
-                    "SRP_number"
-                ),
-
             "customer_PO":
                 page_result.get(
                     "customer_PO"
+                ),
+
+            "SRP_number":
+                page_result.get(
+                    "SRP_number"
                 ),
 
             "delivery_name":
@@ -2880,9 +2769,17 @@ def extract_ulp_with_gpt(
                     "delivery_contact"
                 ),
 
-            "ocr_text_length":
-                len(
-                    google_ocr_text
+            # Critical debugging for this revision.
+            "raw_handling_unit_rows":
+                page_result.get(
+                    "raw_handling_unit_rows",
+                    []
+                ),
+
+            "handling_units":
+                page_result.get(
+                    "handling_units",
+                    []
                 ),
 
             "handling_unit_count":
@@ -2893,13 +2790,14 @@ def extract_ulp_with_gpt(
                     or []
                 ),
 
+            "ocr_text_length":
+                len(
+                    google_ocr_text
+                ),
+
             "usage":
                 usage,
         })
-
-    # ======================================================
-    # GROUP PAGES INTO SHIPMENTS
-    # ======================================================
 
     grouped_shipments = (
         _group_pages_into_shipments(
@@ -2913,7 +2811,7 @@ def extract_ulp_with_gpt(
             True,
 
         "mode":
-            "google_ocr_plus_gpt",
+            "google_ocr_plus_gpt_raw_hu_rows",
 
         "model":
             MODEL,
@@ -2947,7 +2845,6 @@ def extract_ulp_with_gpt(
         },
 
         "extraction": {
-
             "sales_orders":
                 grouped_shipments
         },
