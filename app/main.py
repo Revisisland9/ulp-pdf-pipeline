@@ -15,6 +15,9 @@ from typing import Any, Dict
 
 import base64
 
+from io import BytesIO
+from pypdf import PdfReader
+
 
 from app.models import RenderEnvelope
 
@@ -397,6 +400,148 @@ async def extract_ulp_gpt_test(
 
             detail=(
                 "GPT extraction test failed: "
+                f"{str(exc)}"
+            ),
+        )
+
+
+# ==========================================================
+# ULP PACKET SPLIT - STEP 1
+# ==========================================================
+
+@app.post(
+    "/api/v1/ulp/split-packet"
+)
+async def split_ulp_packet(
+    file: UploadFile = File(...)
+):
+    """
+    STEP 1 - PACKET SPLIT WORKFLOW
+
+    Current purpose:
+
+        PDF
+            ↓
+        Validate file
+            ↓
+        Open PDF
+            ↓
+        Count pages
+            ↓
+        Return JSON confirmation
+
+    Future versions will:
+
+        PDF
+            ↓
+        OCR / GPT page analysis
+            ↓
+        identify SO-######## packet boundaries
+            ↓
+        group supporting pages by Sales Order
+            ↓
+        split original PDF
+            ↓
+        name files by Sales Order
+            ↓
+        sort files by SO numeric sequence
+            ↓
+        create ZIP
+            ↓
+        return ZIP / manifest to Apps Script
+
+    IMPORTANT:
+
+    This endpoint is intentionally independent from:
+
+        /api/v1/ulp/extract
+
+    The two workflows may reuse the same OCR / GPT
+    infrastructure without depending on each other.
+    """
+
+    # ------------------------------------------------------
+    # VALIDATE FILE TYPE
+    # ------------------------------------------------------
+
+    if (
+        file.content_type
+        != "application/pdf"
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="File must be a PDF.",
+        )
+
+    # ------------------------------------------------------
+    # READ UPLOADED PDF
+    # ------------------------------------------------------
+
+    pdf_bytes = await file.read()
+
+    if not pdf_bytes:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded PDF is empty.",
+        )
+
+    try:
+
+        # ==================================================
+        # STEP 1
+        # OPEN PDF
+        # ==================================================
+
+        reader = PdfReader(
+            BytesIO(
+                pdf_bytes
+            )
+        )
+
+        # ==================================================
+        # STEP 2
+        # COUNT PAGES
+        # ==================================================
+
+        page_count = len(
+            reader.pages
+        )
+
+        # ==================================================
+        # STEP 3
+        # RESPONSE
+        # ==================================================
+
+        return JSONResponse({
+
+            "ok":
+                True,
+
+            "filename":
+                file.filename,
+
+            "page_count":
+                page_count,
+
+            "workflow":
+                "ulp_packet_split",
+
+            "stage":
+                "pdf_intake_test",
+
+            "message":
+                "PDF received and opened successfully.",
+        })
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+
+            detail=(
+                "Packet split intake failed: "
                 f"{str(exc)}"
             ),
         )
