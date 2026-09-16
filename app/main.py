@@ -16,6 +16,7 @@ from typing import Any, Dict
 import base64
 
 from io import BytesIO
+
 from pypdf import PdfReader
 
 
@@ -31,6 +32,10 @@ from app.sheet_mapper import (
 
 from app.openai_extractor import (
     extract_ulp_with_gpt
+)
+
+from app.packet_splitter import (
+    detect_sales_order_pages
 )
 
 
@@ -406,7 +411,8 @@ async def extract_ulp_gpt_test(
 
 
 # ==========================================================
-# ULP PACKET SPLIT - STEP 1
+# ULP PACKET SPLIT
+# STEP 2 - GOOGLE OCR SALES ORDER DETECTION
 # ==========================================================
 
 @app.post(
@@ -416,48 +422,46 @@ async def split_ulp_packet(
     file: UploadFile = File(...)
 ):
     """
-    STEP 1 - PACKET SPLIT WORKFLOW
+    ULP PACKET SPLIT WORKFLOW
 
-    Current purpose:
-
-        PDF
-            ↓
-        Validate file
-            ↓
-        Open PDF
-            ↓
-        Count pages
-            ↓
-        Return JSON confirmation
-
-    Future versions will:
+    CURRENT DEVELOPMENT STAGE:
 
         PDF
             ↓
-        OCR / GPT page analysis
+        validate PDF
             ↓
-        identify SO-######## packet boundaries
+        Google Enterprise OCR
             ↓
-        group supporting pages by Sales Order
+        page-level OCR text
+            ↓
+        detect SO-######## packet starts
+            ↓
+        return packet-start diagnostics
+
+    NEXT DEVELOPMENT STAGE:
+
+        detected packet starts
+            ↓
+        calculate page ranges
             ↓
         split original PDF
             ↓
-        name files by Sales Order
+        name PDFs by Sales Order
             ↓
-        sort files by SO numeric sequence
+        sort PDFs by SO number
             ↓
         create ZIP
             ↓
-        return ZIP / manifest to Apps Script
+        return ZIP to Apps Script
 
     IMPORTANT:
 
-    This endpoint is intentionally independent from:
+    This workflow is independent from:
 
         /api/v1/ulp/extract
 
-    The two workflows may reuse the same OCR / GPT
-    infrastructure without depending on each other.
+    It reuses the same Google OCR infrastructure without
+    invoking the full production GPT shipment extraction.
     """
 
     # ------------------------------------------------------
@@ -475,7 +479,7 @@ async def split_ulp_packet(
         )
 
     # ------------------------------------------------------
-    # READ UPLOADED PDF
+    # READ PDF
     # ------------------------------------------------------
 
     pdf_bytes = await file.read()
@@ -490,8 +494,7 @@ async def split_ulp_packet(
     try:
 
         # ==================================================
-        # STEP 1
-        # OPEN PDF
+        # BASIC PDF VALIDATION
         # ==================================================
 
         reader = PdfReader(
@@ -500,18 +503,53 @@ async def split_ulp_packet(
             )
         )
 
-        # ==================================================
-        # STEP 2
-        # COUNT PAGES
-        # ==================================================
-
-        page_count = len(
+        physical_page_count = len(
             reader.pages
         )
 
+        if physical_page_count <= 0:
+
+            raise ValueError(
+                "PDF contains no pages."
+            )
+
         # ==================================================
-        # STEP 3
-        # RESPONSE
+        # GOOGLE OCR + SALES ORDER DETECTION
+        # ==================================================
+
+        result = (
+            detect_sales_order_pages(
+                pdf_bytes
+            )
+        )
+
+        # ==================================================
+        # SAFETY CHECK
+        # OCR PAGE COUNT MUST MATCH ACTUAL PDF
+        # ==================================================
+
+        ocr_page_count = (
+            result.get(
+                "page_count"
+            )
+            or 0
+        )
+
+        if (
+            ocr_page_count
+            != physical_page_count
+        ):
+
+            raise ValueError(
+                (
+                    "PDF page count does not match OCR page count. "
+                    f"PDF={physical_page_count}, "
+                    f"OCR={ocr_page_count}"
+                )
+            )
+
+        # ==================================================
+        # DEVELOPMENT RESPONSE
         # ==================================================
 
         return JSONResponse({
@@ -522,18 +560,42 @@ async def split_ulp_packet(
             "filename":
                 file.filename,
 
-            "page_count":
-                page_count,
-
             "workflow":
                 "ulp_packet_split",
 
             "stage":
-                "pdf_intake_test",
+                "sales_order_detection",
 
-            "message":
-                "PDF received and opened successfully.",
+            "page_count":
+                physical_page_count,
+
+            "packet_start_count":
+                result.get(
+                    "packet_start_count",
+                    0,
+                ),
+
+            "packet_starts":
+                result.get(
+                    "packet_starts",
+                    [],
+                ),
+
+            "google_ocr":
+                result.get(
+                    "google_ocr"
+                ),
+
+            "pages":
+                result.get(
+                    "pages",
+                    [],
+                ),
         })
+
+    except HTTPException:
+
+        raise
 
     except Exception as exc:
 
@@ -541,7 +603,7 @@ async def split_ulp_packet(
             status_code=500,
 
             detail=(
-                "Packet split intake failed: "
+                "Packet Sales Order detection failed: "
                 f"{str(exc)}"
             ),
         )
