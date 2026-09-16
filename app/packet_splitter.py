@@ -1,10 +1,17 @@
+import io
 import re
+import zipfile
 
 from typing import (
     Any,
     Dict,
     List,
     Optional,
+)
+
+from pypdf import (
+    PdfReader,
+    PdfWriter,
 )
 
 from app.document_ai import (
@@ -15,14 +22,6 @@ from app.document_ai import (
 # ==========================================================
 # SALES ORDER RULES
 # ==========================================================
-
-# Master ULP Sales Order:
-#
-# SO-
-# followed by exactly 8 digits
-#
-# Example:
-# SO-00325428
 
 SALES_ORDER_PATTERN = re.compile(
     r"^SO-\d{8}$",
@@ -36,19 +35,12 @@ SALES_ORDER_SEARCH_PATTERN = re.compile(
 
 
 # ==========================================================
-# SALES ORDER VALIDATION
+# SALES ORDER HELPERS
 # ==========================================================
 
 def _validate_sales_order(
     value: Any,
 ) -> Optional[str]:
-    """
-    Validate and normalize a ULP master Sales Order.
-
-    Valid example:
-
-        SO-00325428
-    """
 
     if value is None:
         return None
@@ -68,31 +60,9 @@ def _validate_sales_order(
     return value
 
 
-# ==========================================================
-# FIND SALES ORDER IN OCR TEXT
-# ==========================================================
-
 def _extract_sales_order_from_ocr(
     page_text: str,
 ) -> Optional[str]:
-    """
-    Find a valid ULP master Sales Order in one page of
-    Google Enterprise OCR text.
-
-    Priority:
-
-    1. Look near a printed "Sales Order" label.
-
-    2. If that fails, look for all SO-######## values on
-       the page.
-
-    3. If exactly one unique valid Sales Order exists,
-       accept it.
-
-    4. If multiple different Sales Orders exist and we
-       cannot confidently determine which one is the master
-       Sales Order, return None.
-    """
 
     page_text = (
         page_text
@@ -110,7 +80,7 @@ def _extract_sales_order_from_ocr(
 
     # ======================================================
     # PASS 1
-    # LOOK NEAR "SALES ORDER" LABEL
+    # LOOK NEAR SALES ORDER LABEL
     # ======================================================
 
     for i, line in enumerate(
@@ -134,14 +104,11 @@ def _extract_sales_order_from_ocr(
         if (
             "sales order"
             not in normalized_label
-
             and "salesorder"
             not in compact
         ):
             continue
 
-        # Search the Sales Order label line and the next
-        # few OCR lines.
         nearby = "\n".join(
             lines[
                 i:min(
@@ -168,7 +135,7 @@ def _extract_sales_order_from_ocr(
 
     # ======================================================
     # PASS 2
-    # UNIQUE SO-######## ANYWHERE ON PAGE
+    # UNIQUE SALES ORDER ANYWHERE ON PAGE
     # ======================================================
 
     matches = (
@@ -179,7 +146,6 @@ def _extract_sales_order_from_ocr(
     )
 
     unique = []
-
     seen = set()
 
     for match in matches:
@@ -212,22 +178,35 @@ def _extract_sales_order_from_ocr(
     return None
 
 
+def _sales_order_sort_key(
+    sales_order: str,
+) -> int:
+    """
+    SO-00325812 -> 325812
+    """
+
+    digits = re.sub(
+        r"\D",
+        "",
+        sales_order
+        or "",
+    )
+
+    if not digits:
+        return 0
+
+    return int(
+        digits
+    )
+
+
 # ==========================================================
-# BUILD OCR PAGE MAP
+# OCR PAGE MAP
 # ==========================================================
 
 def _build_ocr_page_map(
     ocr_result: Dict[str, Any],
 ) -> Dict[int, str]:
-    """
-    Convert Document AI page output into:
-
-        {
-            1: "OCR text...",
-            2: "OCR text...",
-            ...
-        }
-    """
 
     page_map = {}
 
@@ -260,46 +239,18 @@ def _build_ocr_page_map(
 
 
 # ==========================================================
-# DETECT PACKET STARTS
+# DETECT SALES ORDERS BY PAGE
 # ==========================================================
 
 def detect_sales_order_pages(
     pdf_bytes: bytes,
 ) -> Dict[str, Any]:
-    """
-    Analyze an entire scanned packet using the EXISTING
-    Google Enterprise OCR processor.
-
-    This function DOES NOT split the PDF yet.
-
-    Current purpose:
-
-        PDF
-            ↓
-        Google Enterprise OCR
-            ↓
-        OCR text organized by original page number
-            ↓
-        detect valid SO-######## values
-            ↓
-        return packet-start candidates
-
-    A page containing a confidently identified master
-    Sales Order is treated as a packet-start candidate.
-
-    Later versions will use these boundaries to create
-    the individual PDFs.
-    """
 
     if not pdf_bytes:
 
         raise ValueError(
             "PDF is empty."
         )
-
-    # ======================================================
-    # GOOGLE ENTERPRISE OCR
-    # ======================================================
 
     ocr_result = (
         extract_pink_ocr(
@@ -320,27 +271,13 @@ def detect_sales_order_pages(
             "OCR returned no PDF pages."
         )
 
-    # ======================================================
-    # PAGE MAP
-    # ======================================================
-
     ocr_page_map = (
         _build_ocr_page_map(
             ocr_result
         )
     )
 
-    # ======================================================
-    # DETECT SALES ORDERS
-    # ======================================================
-
-    packet_starts: List[
-        Dict[str, Any]
-    ] = []
-
-    page_diagnostics: List[
-        Dict[str, Any]
-    ] = []
+    pages = []
 
     for page_number in range(
         1,
@@ -360,7 +297,7 @@ def detect_sales_order_pages(
             )
         )
 
-        page_diagnostics.append({
+        pages.append({
 
             "page":
                 page_number,
@@ -374,21 +311,6 @@ def detect_sales_order_pages(
                 ),
         })
 
-        if sales_order:
-
-            packet_starts.append({
-
-                "page":
-                    page_number,
-
-                "sales_order":
-                    sales_order,
-            })
-
-    # ======================================================
-    # RETURN
-    # ======================================================
-
     return {
 
         "ok":
@@ -396,14 +318,6 @@ def detect_sales_order_pages(
 
         "page_count":
             total_pages,
-
-        "packet_start_count":
-            len(
-                packet_starts
-            ),
-
-        "packet_starts":
-            packet_starts,
 
         "google_ocr": {
 
@@ -421,8 +335,561 @@ def detect_sales_order_pages(
                 ),
         },
 
-        # Diagnostic only.
-        # Useful while developing against new packet formats.
         "pages":
-            page_diagnostics,
+            pages,
+    }
+
+
+# ==========================================================
+# GROUP PAGES INTO PACKETS
+# ==========================================================
+
+def _group_pages_into_packets(
+    page_results: List[
+        Dict[str, Any]
+    ],
+) -> List[
+    Dict[str, Any]
+]:
+    """
+    Group pages sequentially.
+
+    Rules:
+
+    - First valid SO starts the first packet.
+    - Same SO stays in current packet.
+    - Null SO inherits current packet.
+    - Different valid SO starts a new packet.
+    - Pages before the first valid SO are NOT silently assigned.
+    """
+
+    packets = []
+
+    current_packet = None
+
+    for page in page_results:
+
+        page_number = page.get(
+            "page"
+        )
+
+        sales_order = (
+            _validate_sales_order(
+                page.get(
+                    "sales_order"
+                )
+            )
+        )
+
+        # --------------------------------------------------
+        # NO ACTIVE PACKET YET
+        # --------------------------------------------------
+
+        if current_packet is None:
+
+            if not sales_order:
+
+                packets.append({
+
+                    "sales_order":
+                        None,
+
+                    "pages":
+                        [
+                            page_number
+                        ],
+
+                    "status":
+                        "unassigned",
+                })
+
+                continue
+
+            current_packet = {
+
+                "sales_order":
+                    sales_order,
+
+                "pages":
+                    [
+                        page_number
+                    ],
+
+                "status":
+                    "assigned",
+            }
+
+            continue
+
+        # --------------------------------------------------
+        # NULL PAGE
+        # INHERIT CURRENT SALES ORDER
+        # --------------------------------------------------
+
+        if not sales_order:
+
+            current_packet[
+                "pages"
+            ].append(
+                page_number
+            )
+
+            continue
+
+        # --------------------------------------------------
+        # SAME SALES ORDER
+        # --------------------------------------------------
+
+        if (
+            sales_order
+            == current_packet[
+                "sales_order"
+            ]
+        ):
+
+            current_packet[
+                "pages"
+            ].append(
+                page_number
+            )
+
+            continue
+
+        # --------------------------------------------------
+        # DIFFERENT SALES ORDER
+        # CLOSE CURRENT PACKET AND START NEXT
+        # --------------------------------------------------
+
+        packets.append(
+            current_packet
+        )
+
+        current_packet = {
+
+            "sales_order":
+                sales_order,
+
+            "pages":
+                [
+                    page_number
+                ],
+
+            "status":
+                "assigned",
+        }
+
+    if current_packet is not None:
+
+        packets.append(
+            current_packet
+        )
+
+    return packets
+
+
+# ==========================================================
+# VALIDATE PACKET ASSIGNMENT
+# ==========================================================
+
+def _validate_packet_assignment(
+    packets: List[
+        Dict[str, Any]
+    ],
+    total_pages: int,
+) -> Dict[str, Any]:
+
+    assigned_pages = []
+    unassigned_pages = []
+
+    for packet in packets:
+
+        sales_order = packet.get(
+            "sales_order"
+        )
+
+        pages = (
+            packet.get(
+                "pages"
+            )
+            or []
+        )
+
+        if sales_order:
+
+            assigned_pages.extend(
+                pages
+            )
+
+        else:
+
+            unassigned_pages.extend(
+                pages
+            )
+
+    duplicates = []
+
+    seen = set()
+
+    for page_number in assigned_pages:
+
+        if page_number in seen:
+
+            duplicates.append(
+                page_number
+            )
+
+        seen.add(
+            page_number
+        )
+
+    expected_pages = set(
+        range(
+            1,
+            total_pages + 1,
+        )
+    )
+
+    actual_pages = set(
+        assigned_pages
+        + unassigned_pages
+    )
+
+    missing_pages = sorted(
+        expected_pages
+        - actual_pages
+    )
+
+    unexpected_pages = sorted(
+        actual_pages
+        - expected_pages
+    )
+
+    return {
+
+        "assigned_pages":
+            sorted(
+                assigned_pages
+            ),
+
+        "assigned_page_count":
+            len(
+                assigned_pages
+            ),
+
+        "unassigned_pages":
+            sorted(
+                unassigned_pages
+            ),
+
+        "duplicate_pages":
+            sorted(
+                set(
+                    duplicates
+                )
+            ),
+
+        "missing_pages":
+            missing_pages,
+
+        "unexpected_pages":
+            unexpected_pages,
+
+        "valid":
+            (
+                len(
+                    unassigned_pages
+                )
+                == 0
+
+                and len(
+                    duplicates
+                )
+                == 0
+
+                and len(
+                    missing_pages
+                )
+                == 0
+
+                and len(
+                    unexpected_pages
+                )
+                == 0
+
+                and len(
+                    assigned_pages
+                )
+                == total_pages
+            ),
+    }
+
+
+# ==========================================================
+# BUILD ONE PDF
+# ==========================================================
+
+def _build_packet_pdf(
+    reader: PdfReader,
+    page_numbers: List[int],
+) -> bytes:
+
+    writer = PdfWriter()
+
+    for page_number in page_numbers:
+
+        page_index = (
+            page_number
+            - 1
+        )
+
+        writer.add_page(
+            reader.pages[
+                page_index
+            ]
+        )
+
+    output = io.BytesIO()
+
+    writer.write(
+        output
+    )
+
+    return output.getvalue()
+
+
+# ==========================================================
+# SPLIT PDF + CREATE ZIP
+# ==========================================================
+
+def split_packet_to_zip(
+    pdf_bytes: bytes,
+) -> Dict[str, Any]:
+    """
+    Full packet splitter.
+
+    Returns:
+
+        {
+            "zip_bytes": ...,
+            "manifest": {...}
+        }
+    """
+
+    if not pdf_bytes:
+
+        raise ValueError(
+            "PDF is empty."
+        )
+
+    reader = PdfReader(
+        io.BytesIO(
+            pdf_bytes
+        )
+    )
+
+    total_pages = len(
+        reader.pages
+    )
+
+    if total_pages <= 0:
+
+        raise ValueError(
+            "PDF contains no pages."
+        )
+
+    # ======================================================
+    # OCR
+    # ======================================================
+
+    detection = (
+        detect_sales_order_pages(
+            pdf_bytes
+        )
+    )
+
+    page_results = (
+        detection.get(
+            "pages"
+        )
+        or []
+    )
+
+    # ======================================================
+    # GROUP
+    # ======================================================
+
+    packets = (
+        _group_pages_into_packets(
+            page_results
+        )
+    )
+
+    # ======================================================
+    # VALIDATE
+    # ======================================================
+
+    validation = (
+        _validate_packet_assignment(
+            packets,
+            total_pages,
+        )
+    )
+
+    if not validation[
+        "valid"
+    ]:
+
+        raise ValueError(
+            (
+                "Packet assignment validation failed. "
+                f"Unassigned={validation['unassigned_pages']}, "
+                f"Duplicates={validation['duplicate_pages']}, "
+                f"Missing={validation['missing_pages']}, "
+                f"Unexpected={validation['unexpected_pages']}"
+            )
+        )
+
+    # ======================================================
+    # ONLY ASSIGNED PACKETS
+    # ======================================================
+
+    assigned_packets = [
+        packet
+        for packet in packets
+        if packet.get(
+            "sales_order"
+        )
+    ]
+
+    # ======================================================
+    # SORT BY NUMERIC SO
+    # ======================================================
+
+    assigned_packets.sort(
+        key=lambda packet:
+            _sales_order_sort_key(
+                packet[
+                    "sales_order"
+                ]
+            )
+    )
+
+    # ======================================================
+    # BUILD ZIP
+    # ======================================================
+
+    zip_buffer = io.BytesIO()
+
+    manifest_packets = []
+
+    with zipfile.ZipFile(
+        zip_buffer,
+        mode="w",
+        compression=
+            zipfile.ZIP_DEFLATED,
+    ) as zip_file:
+
+        for packet in assigned_packets:
+
+            sales_order = packet[
+                "sales_order"
+            ]
+
+            page_numbers = packet[
+                "pages"
+            ]
+
+            filename = (
+                f"{sales_order}.pdf"
+            )
+
+            packet_pdf = (
+                _build_packet_pdf(
+                    reader,
+                    page_numbers,
+                )
+            )
+
+            zip_file.writestr(
+                filename,
+                packet_pdf,
+            )
+
+            manifest_packets.append({
+
+                "sales_order":
+                    sales_order,
+
+                "filename":
+                    filename,
+
+                "pages":
+                    page_numbers,
+
+                "page_count":
+                    len(
+                        page_numbers
+                    ),
+            })
+
+    zip_bytes = (
+        zip_buffer.getvalue()
+    )
+
+    # ======================================================
+    # FINAL MANIFEST
+    # ======================================================
+
+    manifest = {
+
+        "ok":
+            True,
+
+        "workflow":
+            "ulp_packet_split",
+
+        "page_count":
+            total_pages,
+
+        "packet_count":
+            len(
+                manifest_packets
+            ),
+
+        "assigned_page_count":
+            validation[
+                "assigned_page_count"
+            ],
+
+        "unassigned_pages":
+            validation[
+                "unassigned_pages"
+            ],
+
+        "duplicate_pages":
+            validation[
+                "duplicate_pages"
+            ],
+
+        "missing_pages":
+            validation[
+                "missing_pages"
+            ],
+
+        "packets":
+            manifest_packets,
+
+        "google_ocr":
+            detection.get(
+                "google_ocr"
+            ),
+    }
+
+    return {
+
+        "zip_bytes":
+            zip_bytes,
+
+        "manifest":
+            manifest,
     }
