@@ -14,7 +14,6 @@ from fastapi.responses import (
 from typing import Any, Dict
 
 import base64
-import json
 
 
 from app.models import RenderEnvelope
@@ -32,7 +31,8 @@ from app.openai_extractor import (
 )
 
 from app.packet_splitter import (
-    split_packet_to_zip
+    analyze_packet,
+    split_packet_to_zip,
 )
 
 
@@ -332,7 +332,65 @@ async def extract_ulp_gpt_test(
 
 
 # ==========================================================
-# ULP PACKET SPLIT - ZIP OUTPUT
+# ULP PACKET INSPECT
+# ==========================================================
+
+@app.post(
+    "/api/v1/ulp/split-packet/inspect"
+)
+async def inspect_ulp_packet(
+    file: UploadFile = File(...)
+):
+
+    if (
+        file.content_type
+        != "application/pdf"
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="File must be a PDF.",
+        )
+
+    pdf_bytes = await file.read()
+
+    if not pdf_bytes:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded PDF is empty.",
+        )
+
+    try:
+
+        result = (
+            analyze_packet(
+                pdf_bytes
+            )
+        )
+
+        return JSONResponse({
+
+            "filename":
+                file.filename,
+
+            **result,
+        })
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+
+            detail=(
+                "Packet inspection failed: "
+                f"{str(exc)}"
+            ),
+        )
+
+
+# ==========================================================
+# ULP PACKET SPLIT - PRODUCTION ZIP
 # ==========================================================
 
 @app.post(
@@ -342,29 +400,17 @@ async def split_ulp_packet(
     file: UploadFile = File(...)
 ):
     """
-    Full ULP packet split workflow.
+    SUCCESS:
+        Return valid SO PDFs + manifest.json
 
-    PDF
-        ↓
-    Google OCR
-        ↓
-    detect SO-######## by page
-        ↓
-    group sequential pages
-        ↓
-    inherit null SO pages into current packet
-        ↓
-    validate every page assigned exactly once
-        ↓
-    create one PDF per SO
-        ↓
-    sort PDFs by SO numeric sequence
-        ↓
-    return ZIP
+    PARTIAL_SUCCESS:
+        Return valid SO PDFs
+        + REVIEW_REQUIRED_PAGES.pdf
+        + manifest.json
 
-    Manifest is returned in the response header:
-
-        X-ULP-Manifest
+    FAILED:
+        Return JSON error information
+        and no ZIP.
     """
 
     if (
@@ -394,30 +440,80 @@ async def split_ulp_packet(
             )
         )
 
-        zip_bytes = (
-            result[
-                "zip_bytes"
-            ]
-        )
-
         manifest = (
             result[
                 "manifest"
             ]
         )
 
-        # Compact manifest for response header.
-        manifest_header = json.dumps(
-            manifest,
-            separators=(
-                ",",
-                ":",
-            ),
+        status = (
+            result[
+                "status"
+            ]
         )
+
+        # ==================================================
+        # TOTAL FAILURE
+        # ==================================================
+
+        if status == "FAILED":
+
+            return JSONResponse(
+                status_code=422,
+
+                content={
+
+                    "ok":
+                        False,
+
+                    "status":
+                        "FAILED",
+
+                    "filename":
+                        file.filename,
+
+                    "page_count":
+                        manifest.get(
+                            "page_count"
+                        ),
+
+                    "packet_count":
+                        manifest.get(
+                            "packet_count"
+                        ),
+
+                    "review_page_count":
+                        manifest.get(
+                            "review_page_count"
+                        ),
+
+                    "review_pages":
+                        manifest.get(
+                            "review_pages"
+                        ),
+
+                    "exception_count":
+                        manifest.get(
+                            "exception_count"
+                        ),
+
+                    "exceptions":
+                        manifest.get(
+                            "exceptions"
+                        ),
+                },
+            )
+
+        # ==================================================
+        # SUCCESS OR PARTIAL SUCCESS
+        # BOTH RETURN ZIP
+        # ==================================================
 
         return Response(
             content=
-                zip_bytes,
+                result[
+                    "zip_bytes"
+                ],
 
             media_type=
                 "application/zip",
@@ -425,10 +521,48 @@ async def split_ulp_packet(
             headers={
 
                 "Content-Disposition":
-                    'attachment; filename="ULP_Split_Packet.zip"',
+                    (
+                        'attachment; '
+                        'filename="ULP_Split_Packet.zip"'
+                    ),
 
-                "X-ULP-Manifest":
-                    manifest_header,
+                "X-ULP-Status":
+                    status,
+
+                "X-ULP-Page-Count":
+                    str(
+                        manifest[
+                            "page_count"
+                        ]
+                    ),
+
+                "X-ULP-Packet-Count":
+                    str(
+                        manifest[
+                            "packet_count"
+                        ]
+                    ),
+
+                "X-ULP-Assigned-Page-Count":
+                    str(
+                        manifest[
+                            "assigned_page_count"
+                        ]
+                    ),
+
+                "X-ULP-Review-Page-Count":
+                    str(
+                        manifest[
+                            "review_page_count"
+                        ]
+                    ),
+
+                "X-ULP-Exception-Count":
+                    str(
+                        manifest[
+                            "exception_count"
+                        ]
+                    ),
             },
         )
 
