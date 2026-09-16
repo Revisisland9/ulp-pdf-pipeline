@@ -1,5 +1,6 @@
 import io
 import re
+import json
 import zipfile
 
 from typing import (
@@ -80,7 +81,7 @@ def _extract_sales_order_from_ocr(
 
     # ======================================================
     # PASS 1
-    # LOOK NEAR SALES ORDER LABEL
+    # LOOK NEAR "SALES ORDER"
     # ======================================================
 
     for i, line in enumerate(
@@ -135,7 +136,7 @@ def _extract_sales_order_from_ocr(
 
     # ======================================================
     # PASS 2
-    # UNIQUE SALES ORDER ANYWHERE ON PAGE
+    # UNIQUE SO ANYWHERE ON PAGE
     # ======================================================
 
     matches = (
@@ -181,9 +182,6 @@ def _extract_sales_order_from_ocr(
 def _sales_order_sort_key(
     sales_order: str,
 ) -> int:
-    """
-    SO-00325812 -> 325812
-    """
 
     digits = re.sub(
         r"\D",
@@ -192,11 +190,10 @@ def _sales_order_sort_key(
         or "",
     )
 
-    if not digits:
-        return 0
-
-    return int(
-        digits
+    return (
+        int(digits)
+        if digits
+        else 0
     )
 
 
@@ -268,7 +265,7 @@ def detect_sales_order_pages(
     if total_pages <= 0:
 
         raise ValueError(
-            "OCR returned no PDF pages."
+            "OCR returned no pages."
         )
 
     ocr_page_map = (
@@ -313,11 +310,11 @@ def detect_sales_order_pages(
 
     return {
 
-        "ok":
-            True,
-
         "page_count":
             total_pages,
+
+        "pages":
+            pages,
 
         "google_ocr": {
 
@@ -334,14 +331,11 @@ def detect_sales_order_pages(
                     "chunk_count"
                 ),
         },
-
-        "pages":
-            pages,
     }
 
 
 # ==========================================================
-# GROUP PAGES INTO PACKETS
+# GROUP PAGES INTO SEQUENTIAL PACKETS
 # ==========================================================
 
 def _group_pages_into_packets(
@@ -352,20 +346,20 @@ def _group_pages_into_packets(
     Dict[str, Any]
 ]:
     """
-    Group pages sequentially.
-
     Rules:
 
-    - First valid SO starts the first packet.
-    - Same SO stays in current packet.
+    - A valid SO starts a packet.
+    - Repeated same SO stays in packet.
     - Null SO inherits current packet.
-    - Different valid SO starts a new packet.
-    - Pages before the first valid SO are NOT silently assigned.
+    - Different valid SO starts next packet.
+    - Pages before the first detected SO remain unassigned.
     """
 
     packets = []
 
     current_packet = None
+
+    leading_unassigned = []
 
     for page in page_results:
 
@@ -382,12 +376,20 @@ def _group_pages_into_packets(
         )
 
         # --------------------------------------------------
-        # NO ACTIVE PACKET YET
+        # BEFORE FIRST VALID SO
         # --------------------------------------------------
 
         if current_packet is None:
 
             if not sales_order:
+
+                leading_unassigned.append(
+                    page_number
+                )
+
+                continue
+
+            if leading_unassigned:
 
                 packets.append({
 
@@ -395,15 +397,13 @@ def _group_pages_into_packets(
                         None,
 
                     "pages":
-                        [
-                            page_number
-                        ],
+                        leading_unassigned,
 
                     "status":
                         "unassigned",
                 })
 
-                continue
+                leading_unassigned = []
 
             current_packet = {
 
@@ -422,8 +422,8 @@ def _group_pages_into_packets(
             continue
 
         # --------------------------------------------------
-        # NULL PAGE
-        # INHERIT CURRENT SALES ORDER
+        # NULL SO
+        # INHERIT ACTIVE PACKET
         # --------------------------------------------------
 
         if not sales_order:
@@ -437,7 +437,7 @@ def _group_pages_into_packets(
             continue
 
         # --------------------------------------------------
-        # SAME SALES ORDER
+        # SAME SO
         # --------------------------------------------------
 
         if (
@@ -456,8 +456,7 @@ def _group_pages_into_packets(
             continue
 
         # --------------------------------------------------
-        # DIFFERENT SALES ORDER
-        # CLOSE CURRENT PACKET AND START NEXT
+        # NEW SO
         # --------------------------------------------------
 
         packets.append(
@@ -478,201 +477,102 @@ def _group_pages_into_packets(
                 "assigned",
         }
 
+    # ------------------------------------------------------
+    # FINISH ACTIVE PACKET
+    # ------------------------------------------------------
+
     if current_packet is not None:
 
         packets.append(
             current_packet
         )
 
+    # ------------------------------------------------------
+    # PDF WITH NO DETECTED SO AT ALL
+    # ------------------------------------------------------
+
+    elif leading_unassigned:
+
+        packets.append({
+
+            "sales_order":
+                None,
+
+            "pages":
+                leading_unassigned,
+
+            "status":
+                "unassigned",
+        })
+
     return packets
 
 
 # ==========================================================
-# VALIDATE PACKET ASSIGNMENT
+# FIND NON-CONTIGUOUS DUPLICATE SALES ORDERS
 # ==========================================================
 
-def _validate_packet_assignment(
+def _find_noncontiguous_duplicate_sales_orders(
     packets: List[
         Dict[str, Any]
     ],
-    total_pages: int,
-) -> Dict[str, Any]:
+) -> List[str]:
 
-    assigned_pages = []
-    unassigned_pages = []
+    counts = {}
 
     for packet in packets:
 
-        sales_order = packet.get(
-            "sales_order"
+        sales_order = (
+            _validate_sales_order(
+                packet.get(
+                    "sales_order"
+                )
+            )
         )
 
-        pages = (
-            packet.get(
-                "pages"
+        if not sales_order:
+            continue
+
+        counts[
+            sales_order
+        ] = (
+            counts.get(
+                sales_order,
+                0,
             )
-            or []
+            + 1
         )
 
-        if sales_order:
+    duplicates = [
+        sales_order
+        for sales_order, count
+        in counts.items()
+        if count > 1
+    ]
 
-            assigned_pages.extend(
-                pages
-            )
-
-        else:
-
-            unassigned_pages.extend(
-                pages
-            )
-
-    duplicates = []
-
-    seen = set()
-
-    for page_number in assigned_pages:
-
-        if page_number in seen:
-
-            duplicates.append(
-                page_number
-            )
-
-        seen.add(
-            page_number
-        )
-
-    expected_pages = set(
-        range(
-            1,
-            total_pages + 1,
-        )
+    return sorted(
+        duplicates,
+        key=_sales_order_sort_key,
     )
-
-    actual_pages = set(
-        assigned_pages
-        + unassigned_pages
-    )
-
-    missing_pages = sorted(
-        expected_pages
-        - actual_pages
-    )
-
-    unexpected_pages = sorted(
-        actual_pages
-        - expected_pages
-    )
-
-    return {
-
-        "assigned_pages":
-            sorted(
-                assigned_pages
-            ),
-
-        "assigned_page_count":
-            len(
-                assigned_pages
-            ),
-
-        "unassigned_pages":
-            sorted(
-                unassigned_pages
-            ),
-
-        "duplicate_pages":
-            sorted(
-                set(
-                    duplicates
-                )
-            ),
-
-        "missing_pages":
-            missing_pages,
-
-        "unexpected_pages":
-            unexpected_pages,
-
-        "valid":
-            (
-                len(
-                    unassigned_pages
-                )
-                == 0
-
-                and len(
-                    duplicates
-                )
-                == 0
-
-                and len(
-                    missing_pages
-                )
-                == 0
-
-                and len(
-                    unexpected_pages
-                )
-                == 0
-
-                and len(
-                    assigned_pages
-                )
-                == total_pages
-            ),
-    }
 
 
 # ==========================================================
-# BUILD ONE PDF
+# BUILD ANALYSIS / REVIEW PLAN
 # ==========================================================
 
-def _build_packet_pdf(
-    reader: PdfReader,
-    page_numbers: List[int],
-) -> bytes:
-
-    writer = PdfWriter()
-
-    for page_number in page_numbers:
-
-        page_index = (
-            page_number
-            - 1
-        )
-
-        writer.add_page(
-            reader.pages[
-                page_index
-            ]
-        )
-
-    output = io.BytesIO()
-
-    writer.write(
-        output
-    )
-
-    return output.getvalue()
-
-
-# ==========================================================
-# SPLIT PDF + CREATE ZIP
-# ==========================================================
-
-def split_packet_to_zip(
+def analyze_packet(
     pdf_bytes: bytes,
 ) -> Dict[str, Any]:
     """
-    Full packet splitter.
+    Analyze the packet and determine:
 
-    Returns:
+    - valid SO packets
+    - pages requiring review
+    - exceptions
+    - final status
 
-        {
-            "zip_bytes": ...,
-            "manifest": {...}
-        }
+    Every source page should ultimately be represented either
+    by a valid SO PDF or REVIEW_REQUIRED_PAGES.pdf.
     """
 
     if not pdf_bytes:
@@ -698,7 +598,7 @@ def split_packet_to_zip(
         )
 
     # ======================================================
-    # OCR
+    # OCR + SO DETECTION
     # ======================================================
 
     detection = (
@@ -706,6 +606,23 @@ def split_packet_to_zip(
             pdf_bytes
         )
     )
+
+    detected_page_count = (
+        detection.get(
+            "page_count"
+        )
+        or 0
+    )
+
+    if detected_page_count != total_pages:
+
+        raise ValueError(
+            (
+                "OCR page count does not match PDF page count. "
+                f"PDF={total_pages}, "
+                f"OCR={detected_page_count}"
+            )
+        )
 
     page_results = (
         detection.get(
@@ -715,57 +632,295 @@ def split_packet_to_zip(
     )
 
     # ======================================================
-    # GROUP
+    # INITIAL SEQUENTIAL GROUPING
     # ======================================================
 
-    packets = (
+    raw_packets = (
         _group_pages_into_packets(
             page_results
         )
     )
 
-    # ======================================================
-    # VALIDATE
-    # ======================================================
-
-    validation = (
-        _validate_packet_assignment(
-            packets,
-            total_pages,
+    duplicate_sos = (
+        _find_noncontiguous_duplicate_sales_orders(
+            raw_packets
         )
     )
 
-    if not validation[
-        "valid"
-    ]:
+    duplicate_so_set = set(
+        duplicate_sos
+    )
 
-        raise ValueError(
-            (
-                "Packet assignment validation failed. "
-                f"Unassigned={validation['unassigned_pages']}, "
-                f"Duplicates={validation['duplicate_pages']}, "
-                f"Missing={validation['missing_pages']}, "
-                f"Unexpected={validation['unexpected_pages']}"
+    valid_packets = []
+
+    review_pages = set()
+
+    exceptions = []
+
+    # ======================================================
+    # HANDLE PACKETS
+    # ======================================================
+
+    for packet in raw_packets:
+
+        sales_order = (
+            _validate_sales_order(
+                packet.get(
+                    "sales_order"
+                )
             )
         )
 
-    # ======================================================
-    # ONLY ASSIGNED PACKETS
-    # ======================================================
-
-    assigned_packets = [
-        packet
-        for packet in packets
-        if packet.get(
-            "sales_order"
+        pages = sorted(
+            set(
+                packet.get(
+                    "pages"
+                )
+                or []
+            )
         )
-    ]
+
+        # --------------------------------------------------
+        # NO SALES ORDER
+        # --------------------------------------------------
+
+        if not sales_order:
+
+            review_pages.update(
+                pages
+            )
+
+            if pages:
+
+                exceptions.append({
+
+                    "type":
+                        "unassigned_pages",
+
+                    "message":
+                        (
+                            "Pages could not be confidently assigned "
+                            "to a Sales Order."
+                        ),
+
+                    "pages":
+                        pages,
+                })
+
+            continue
+
+        # --------------------------------------------------
+        # SAME SO APPEARED IN MULTIPLE BLOCKS
+        # --------------------------------------------------
+
+        if sales_order in duplicate_so_set:
+
+            review_pages.update(
+                pages
+            )
+
+            continue
+
+        # --------------------------------------------------
+        # NORMAL VALID PACKET
+        # --------------------------------------------------
+
+        valid_packets.append({
+
+            "sales_order":
+                sales_order,
+
+            "filename":
+                f"{sales_order}.pdf",
+
+            "pages":
+                pages,
+
+            "page_count":
+                len(
+                    pages
+                ),
+        })
 
     # ======================================================
-    # SORT BY NUMERIC SO
+    # ADD ONE DUPLICATE-SO EXCEPTION PER SALES ORDER
     # ======================================================
 
-    assigned_packets.sort(
+    for sales_order in duplicate_sos:
+
+        ambiguous_pages = []
+
+        for packet in raw_packets:
+
+            if (
+                _validate_sales_order(
+                    packet.get(
+                        "sales_order"
+                    )
+                )
+                == sales_order
+            ):
+
+                ambiguous_pages.extend(
+                    packet.get(
+                        "pages"
+                    )
+                    or []
+                )
+
+        ambiguous_pages = sorted(
+            set(
+                ambiguous_pages
+            )
+        )
+
+        review_pages.update(
+            ambiguous_pages
+        )
+
+        exceptions.append({
+
+            "type":
+                "noncontiguous_duplicate_sales_order",
+
+            "message":
+                (
+                    f"{sales_order} appeared in more than one "
+                    "non-contiguous packet. Those pages require review."
+                ),
+
+            "sales_order":
+                sales_order,
+
+            "pages":
+                ambiguous_pages,
+        })
+
+    # ======================================================
+    # CHECK THAT EVERY PAGE IS REPRESENTED
+    # ======================================================
+
+    valid_packet_pages = set()
+
+    for packet in valid_packets:
+
+        valid_packet_pages.update(
+            packet[
+                "pages"
+            ]
+        )
+
+    represented_pages = (
+        valid_packet_pages
+        | review_pages
+    )
+
+    expected_pages = set(
+        range(
+            1,
+            total_pages + 1,
+        )
+    )
+
+    missing_pages = sorted(
+        expected_pages
+        - represented_pages
+    )
+
+    if missing_pages:
+
+        review_pages.update(
+            missing_pages
+        )
+
+        exceptions.append({
+
+            "type":
+                "missing_pages",
+
+            "message":
+                (
+                    "Pages were not represented in the initial "
+                    "packet grouping and were moved to review."
+                ),
+
+            "pages":
+                missing_pages,
+        })
+
+    # ======================================================
+    # OVERLAP CHECK
+    # ======================================================
+
+    overlap_pages = sorted(
+        valid_packet_pages
+        & review_pages
+    )
+
+    if overlap_pages:
+
+        # Safety rule:
+        # review wins.
+        #
+        # Remove any affected entire packet from automated
+        # output because its assignment is now ambiguous.
+
+        surviving_packets = []
+
+        for packet in valid_packets:
+
+            packet_pages = set(
+                packet[
+                    "pages"
+                ]
+            )
+
+            if packet_pages & set(
+                overlap_pages
+            ):
+
+                review_pages.update(
+                    packet_pages
+                )
+
+                exceptions.append({
+
+                    "type":
+                        "packet_overlap",
+
+                    "message":
+                        (
+                            f"{packet['sales_order']} contained pages "
+                            "that were also marked for review. "
+                            "The entire packet was moved to review."
+                        ),
+
+                    "sales_order":
+                        packet[
+                            "sales_order"
+                        ],
+
+                    "pages":
+                        packet[
+                            "pages"
+                        ],
+                })
+
+            else:
+
+                surviving_packets.append(
+                    packet
+                )
+
+        valid_packets = (
+            surviving_packets
+        )
+
+    # ======================================================
+    # SORT AUTOMATED OUTPUT
+    # ======================================================
+
+    valid_packets.sort(
         key=lambda packet:
             _sales_order_sort_key(
                 packet[
@@ -774,76 +929,132 @@ def split_packet_to_zip(
             )
     )
 
-    # ======================================================
-    # BUILD ZIP
-    # ======================================================
-
-    zip_buffer = io.BytesIO()
-
-    manifest_packets = []
-
-    with zipfile.ZipFile(
-        zip_buffer,
-        mode="w",
-        compression=
-            zipfile.ZIP_DEFLATED,
-    ) as zip_file:
-
-        for packet in assigned_packets:
-
-            sales_order = packet[
-                "sales_order"
-            ]
-
-            page_numbers = packet[
-                "pages"
-            ]
-
-            filename = (
-                f"{sales_order}.pdf"
-            )
-
-            packet_pdf = (
-                _build_packet_pdf(
-                    reader,
-                    page_numbers,
-                )
-            )
-
-            zip_file.writestr(
-                filename,
-                packet_pdf,
-            )
-
-            manifest_packets.append({
-
-                "sales_order":
-                    sales_order,
-
-                "filename":
-                    filename,
-
-                "pages":
-                    page_numbers,
-
-                "page_count":
-                    len(
-                        page_numbers
-                    ),
-            })
-
-    zip_bytes = (
-        zip_buffer.getvalue()
+    review_pages = sorted(
+        review_pages
     )
 
     # ======================================================
-    # FINAL MANIFEST
+    # FINAL COVERAGE CHECK
     # ======================================================
 
-    manifest = {
+    final_assigned_pages = set()
+
+    for packet in valid_packets:
+
+        final_assigned_pages.update(
+            packet[
+                "pages"
+            ]
+        )
+
+    final_covered_pages = (
+        final_assigned_pages
+        | set(
+            review_pages
+        )
+    )
+
+    final_missing_pages = sorted(
+        expected_pages
+        - final_covered_pages
+    )
+
+    if final_missing_pages:
+
+        review_pages = sorted(
+            set(
+                review_pages
+            )
+            | set(
+                final_missing_pages
+            )
+        )
+
+        exceptions.append({
+
+            "type":
+                "final_coverage_repair",
+
+            "message":
+                (
+                    "Pages were missing from final coverage and "
+                    "were automatically moved to review."
+                ),
+
+            "pages":
+                final_missing_pages,
+        })
+
+    # ======================================================
+    # STATUS
+    # ======================================================
+
+    if (
+        valid_packets
+        and not review_pages
+        and not exceptions
+    ):
+
+        status = "SUCCESS"
+
+    elif valid_packets:
+
+        status = "PARTIAL_SUCCESS"
+
+    else:
+
+        status = "FAILED"
+
+    # ======================================================
+    # CUSTOMER-FACING SUMMARY
+    # ======================================================
+
+    customer_summary = {
+
+        "status":
+            status,
+
+        "pages_received":
+            total_pages,
+
+        "sales_orders_created":
+            len(
+                valid_packets
+            ),
+
+        "pages_assigned":
+            sum(
+                packet[
+                    "page_count"
+                ]
+                for packet in valid_packets
+            ),
+
+        "review_page_count":
+            len(
+                review_pages
+            ),
+
+        "review_pages":
+            review_pages,
+
+        "exception_count":
+            len(
+                exceptions
+            ),
+    }
+
+    return {
 
         "ok":
-            True,
+            status
+            in (
+                "SUCCESS",
+                "PARTIAL_SUCCESS",
+            ),
+
+        "status":
+            status,
 
         "workflow":
             "ulp_packet_split",
@@ -853,43 +1064,209 @@ def split_packet_to_zip(
 
         "packet_count":
             len(
-                manifest_packets
+                valid_packets
             ),
 
+        "sales_orders":
+            [
+                packet[
+                    "sales_order"
+                ]
+                for packet in valid_packets
+            ],
+
         "assigned_page_count":
-            validation[
-                "assigned_page_count"
+            customer_summary[
+                "pages_assigned"
             ],
 
-        "unassigned_pages":
-            validation[
-                "unassigned_pages"
-            ],
+        "review_page_count":
+            len(
+                review_pages
+            ),
 
-        "duplicate_pages":
-            validation[
-                "duplicate_pages"
-            ],
+        "review_pages":
+            review_pages,
 
-        "missing_pages":
-            validation[
-                "missing_pages"
-            ],
+        "exception_count":
+            len(
+                exceptions
+            ),
+
+        "exceptions":
+            exceptions,
 
         "packets":
-            manifest_packets,
+            valid_packets,
+
+        "customer_summary":
+            customer_summary,
 
         "google_ocr":
             detection.get(
                 "google_ocr"
             ),
+
+        "page_diagnostics":
+            page_results,
     }
+
+
+# ==========================================================
+# BUILD PDF FROM SELECTED PAGES
+# ==========================================================
+
+def _build_pdf_from_pages(
+    reader: PdfReader,
+    page_numbers: List[int],
+) -> bytes:
+
+    writer = PdfWriter()
+
+    for page_number in page_numbers:
+
+        writer.add_page(
+            reader.pages[
+                page_number
+                - 1
+            ]
+        )
+
+    output = io.BytesIO()
+
+    writer.write(
+        output
+    )
+
+    return output.getvalue()
+
+
+# ==========================================================
+# BUILD ZIP
+# ==========================================================
+
+def split_packet_to_zip(
+    pdf_bytes: bytes,
+) -> Dict[str, Any]:
+
+    manifest = (
+        analyze_packet(
+            pdf_bytes
+        )
+    )
+
+    # ======================================================
+    # TOTAL FAILURE
+    # ======================================================
+
+    if manifest[
+        "status"
+    ] == "FAILED":
+
+        return {
+
+            "ok":
+                False,
+
+            "status":
+                "FAILED",
+
+            "manifest":
+                manifest,
+
+            "zip_bytes":
+                None,
+        }
+
+    reader = PdfReader(
+        io.BytesIO(
+            pdf_bytes
+        )
+    )
+
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(
+        zip_buffer,
+        mode="w",
+        compression=
+            zipfile.ZIP_DEFLATED,
+    ) as zip_file:
+
+        # ==================================================
+        # VALID SALES ORDER PDFs
+        # ==================================================
+
+        for packet in manifest[
+            "packets"
+        ]:
+
+            packet_pdf = (
+                _build_pdf_from_pages(
+                    reader,
+                    packet[
+                        "pages"
+                    ],
+                )
+            )
+
+            zip_file.writestr(
+                packet[
+                    "filename"
+                ],
+                packet_pdf,
+            )
+
+        # ==================================================
+        # REVIEW PDF
+        # ==================================================
+
+        if manifest[
+            "review_pages"
+        ]:
+
+            review_pdf = (
+                _build_pdf_from_pages(
+                    reader,
+                    manifest[
+                        "review_pages"
+                    ],
+                )
+            )
+
+            zip_file.writestr(
+                "REVIEW_REQUIRED_PAGES.pdf",
+                review_pdf,
+            )
+
+        # ==================================================
+        # MANIFEST
+        # ==================================================
+
+        zip_file.writestr(
+            "manifest.json",
+
+            json.dumps(
+                manifest,
+                indent=2,
+            ).encode(
+                "utf-8"
+            ),
+        )
 
     return {
 
-        "zip_bytes":
-            zip_bytes,
+        "ok":
+            True,
+
+        "status":
+            manifest[
+                "status"
+            ],
 
         "manifest":
             manifest,
+
+        "zip_bytes":
+            zip_buffer.getvalue(),
     }
