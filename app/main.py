@@ -14,10 +14,7 @@ from fastapi.responses import (
 from typing import Any, Dict
 
 import base64
-
-from io import BytesIO
-
-from pypdf import PdfReader
+import json
 
 
 from app.models import RenderEnvelope
@@ -35,7 +32,7 @@ from app.openai_extractor import (
 )
 
 from app.packet_splitter import (
-    detect_sales_order_pages
+    split_packet_to_zip
 )
 
 
@@ -66,21 +63,6 @@ def health():
 def _extract_request(
     payload: Any
 ) -> Dict[str, Any]:
-    """
-    Accept either:
-
-    1) Envelope
-
-       {
-           "endpoint": ...,
-           "email_to": ...,
-           "request": {...}
-       }
-
-    2) Direct shipment request
-
-       {...}
-    """
 
     if (
         isinstance(
@@ -192,31 +174,6 @@ def render_shipment_confirmation_base64(
 async def extract_ulp_pdf(
     file: UploadFile = File(...)
 ):
-    """
-    PRODUCTION PINK WORKFLOW
-
-    PDF
-        ↓
-    Google Enterprise OCR
-        ↓
-    GPT vision / handwriting interpretation
-        ↓
-    Python validation + shipment grouping
-        ↓
-    Sheet mapper
-        ↓
-    existing Apps Script intake
-
-    IMPORTANT:
-
-    Apps Script continues calling exactly the same endpoint:
-
-        /api/v1/ulp/extract
-    """
-
-    # ------------------------------------------------------
-    # VALIDATE FILE
-    # ------------------------------------------------------
 
     if (
         file.content_type
@@ -239,21 +196,11 @@ async def extract_ulp_pdf(
 
     try:
 
-        # ==================================================
-        # STEP 1
-        # HYBRID EXTRACTION
-        # ==================================================
-
         hybrid_result = (
             extract_ulp_with_gpt(
                 pdf_bytes
             )
         )
-
-        # ==================================================
-        # STEP 2
-        # GET GROUPED SALES ORDERS
-        # ==================================================
 
         extraction = (
             hybrid_result.get(
@@ -271,30 +218,16 @@ async def extract_ulp_pdf(
             or []
         )
 
-        # ==================================================
-        # STEP 3
-        # CREATE NORMALIZED PRODUCTION OBJECT
-        # ==================================================
-
         normalized = {
             "sales_orders":
                 sales_orders
         }
-
-        # ==================================================
-        # STEP 4
-        # BUILD EXACT EXISTING SHEET CONTRACT
-        # ==================================================
 
         sheet_rows = (
             build_sheet_rows(
                 normalized
             )
         )
-
-        # ==================================================
-        # PRODUCTION RESPONSE
-        # ==================================================
 
         return JSONResponse({
 
@@ -304,16 +237,12 @@ async def extract_ulp_pdf(
             "filename":
                 file.filename,
 
-            # Keep same key Apps Script already expects.
             "result":
                 normalized,
 
-            # Keep same Sheet response contract.
             "sheet_rows":
                 sheet_rows,
 
-            # Additional diagnostics.
-            # Apps Script can simply ignore these.
             "engine":
                 "google_ocr_plus_gpt",
 
@@ -350,14 +279,6 @@ async def extract_ulp_pdf(
 async def extract_ulp_gpt_test(
     file: UploadFile = File(...)
 ):
-    """
-    Diagnostic endpoint.
-
-    Unlike production, this returns the complete extraction
-    including per-page diagnostics.
-
-    Keep this around for troubleshooting new Pink formats.
-    """
 
     if (
         file.content_type
@@ -411,8 +332,7 @@ async def extract_ulp_gpt_test(
 
 
 # ==========================================================
-# ULP PACKET SPLIT
-# STEP 2 - GOOGLE OCR SALES ORDER DETECTION
+# ULP PACKET SPLIT - ZIP OUTPUT
 # ==========================================================
 
 @app.post(
@@ -422,51 +342,30 @@ async def split_ulp_packet(
     file: UploadFile = File(...)
 ):
     """
-    ULP PACKET SPLIT WORKFLOW
+    Full ULP packet split workflow.
 
-    CURRENT DEVELOPMENT STAGE:
+    PDF
+        ↓
+    Google OCR
+        ↓
+    detect SO-######## by page
+        ↓
+    group sequential pages
+        ↓
+    inherit null SO pages into current packet
+        ↓
+    validate every page assigned exactly once
+        ↓
+    create one PDF per SO
+        ↓
+    sort PDFs by SO numeric sequence
+        ↓
+    return ZIP
 
-        PDF
-            ↓
-        validate PDF
-            ↓
-        Google Enterprise OCR
-            ↓
-        page-level OCR text
-            ↓
-        detect SO-######## packet starts
-            ↓
-        return packet-start diagnostics
+    Manifest is returned in the response header:
 
-    NEXT DEVELOPMENT STAGE:
-
-        detected packet starts
-            ↓
-        calculate page ranges
-            ↓
-        split original PDF
-            ↓
-        name PDFs by Sales Order
-            ↓
-        sort PDFs by SO number
-            ↓
-        create ZIP
-            ↓
-        return ZIP to Apps Script
-
-    IMPORTANT:
-
-    This workflow is independent from:
-
-        /api/v1/ulp/extract
-
-    It reuses the same Google OCR infrastructure without
-    invoking the full production GPT shipment extraction.
+        X-ULP-Manifest
     """
-
-    # ------------------------------------------------------
-    # VALIDATE FILE TYPE
-    # ------------------------------------------------------
 
     if (
         file.content_type
@@ -477,10 +376,6 @@ async def split_ulp_packet(
             status_code=400,
             detail="File must be a PDF.",
         )
-
-    # ------------------------------------------------------
-    # READ PDF
-    # ------------------------------------------------------
 
     pdf_bytes = await file.read()
 
@@ -493,109 +388,49 @@ async def split_ulp_packet(
 
     try:
 
-        # ==================================================
-        # BASIC PDF VALIDATION
-        # ==================================================
-
-        reader = PdfReader(
-            BytesIO(
-                pdf_bytes
-            )
-        )
-
-        physical_page_count = len(
-            reader.pages
-        )
-
-        if physical_page_count <= 0:
-
-            raise ValueError(
-                "PDF contains no pages."
-            )
-
-        # ==================================================
-        # GOOGLE OCR + SALES ORDER DETECTION
-        # ==================================================
-
         result = (
-            detect_sales_order_pages(
+            split_packet_to_zip(
                 pdf_bytes
             )
         )
 
-        # ==================================================
-        # SAFETY CHECK
-        # OCR PAGE COUNT MUST MATCH ACTUAL PDF
-        # ==================================================
-
-        ocr_page_count = (
-            result.get(
-                "page_count"
-            )
-            or 0
+        zip_bytes = (
+            result[
+                "zip_bytes"
+            ]
         )
 
-        if (
-            ocr_page_count
-            != physical_page_count
-        ):
+        manifest = (
+            result[
+                "manifest"
+            ]
+        )
 
-            raise ValueError(
-                (
-                    "PDF page count does not match OCR page count. "
-                    f"PDF={physical_page_count}, "
-                    f"OCR={ocr_page_count}"
-                )
-            )
+        # Compact manifest for response header.
+        manifest_header = json.dumps(
+            manifest,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
 
-        # ==================================================
-        # DEVELOPMENT RESPONSE
-        # ==================================================
+        return Response(
+            content=
+                zip_bytes,
 
-        return JSONResponse({
+            media_type=
+                "application/zip",
 
-            "ok":
-                True,
+            headers={
 
-            "filename":
-                file.filename,
+                "Content-Disposition":
+                    'attachment; filename="ULP_Split_Packet.zip"',
 
-            "workflow":
-                "ulp_packet_split",
-
-            "stage":
-                "sales_order_detection",
-
-            "page_count":
-                physical_page_count,
-
-            "packet_start_count":
-                result.get(
-                    "packet_start_count",
-                    0,
-                ),
-
-            "packet_starts":
-                result.get(
-                    "packet_starts",
-                    [],
-                ),
-
-            "google_ocr":
-                result.get(
-                    "google_ocr"
-                ),
-
-            "pages":
-                result.get(
-                    "pages",
-                    [],
-                ),
-        })
-
-    except HTTPException:
-
-        raise
+                "X-ULP-Manifest":
+                    manifest_header,
+            },
+        )
 
     except Exception as exc:
 
@@ -603,7 +438,7 @@ async def split_ulp_packet(
             status_code=500,
 
             detail=(
-                "Packet Sales Order detection failed: "
+                "Packet split failed: "
                 f"{str(exc)}"
             ),
         )
