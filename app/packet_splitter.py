@@ -731,7 +731,7 @@ def analyze_packet(
                 sales_order,
 
             "filename":
-    f"BOL {sales_order.replace('SO-00', '')}.pdf",
+                f"BOL {sales_order.replace('SO-00', '')}.pdf",
 
             "pages":
                 pages,
