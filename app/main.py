@@ -17,6 +17,7 @@ import base64
 
 
 from app.models import RenderEnvelope
+from app.shipment_intake_routes import router as shipment_intake_router
 
 from app.pdf.shipment_confirmation import (
     build_shipment_confirmation_pdf
@@ -40,6 +41,7 @@ app = FastAPI(
     title="ULP_PDF_PIPELINE",
     version="1.0",
 )
+app.include_router(shipment_intake_router)
 
 
 # ==========================================================

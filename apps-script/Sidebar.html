@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; color: #202124; }
+    label, input, button { display: block; margin-bottom: 12px; }
+    input { max-width: 100%; }
+    button { background: #174ea6; color: white; border: 0; border-radius: 6px; padding: 9px 14px; }
+    button:disabled { opacity: .6; }
+    [role=status] { line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <form id="upload">
+    <label for="document">Shipment document</label>
+    <input id="document" name="document" type="file" accept=".eml,.pdf,.png,.jpg,.jpeg" required>
+    <button type="submit">Upload and extract</button>
+  </form>
+  <p role="status" id="status"></p>
+  <script>
+    const form = document.getElementById('upload');
+    const button = form.querySelector('button');
+    const status = document.getElementById('status');
+
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (button.disabled) return;
+      button.disabled = true;
+      status.textContent = 'Extracting shipment…';
+      google.script.run
+        .withSuccessHandler(result => {
+          form.reset();
+          button.disabled = false;
+          const review = result.hasZip ? '' : ' Enter the origin ZIP if available.';
+          status.textContent = 'Added row ' + result.row + '.' + review + ' Choose a TFWW account in column B.';
+        })
+        .withFailureHandler(error => {
+          button.disabled = false;
+          status.textContent = error.message || 'Upload failed.';
+        })
+        .uploadShipment(form);
+    });
+  </script>
+</body>
+</html>
