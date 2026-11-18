@@ -264,6 +264,10 @@ function saveShipmentReview(review) {
       throw new Error('The selected row or shipment changed. Open it again before saving.');
     }
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    for (const item of review.shipment.items) {
+      item.dimension_uom = item.dimension_uom ?? null;
+      item.hazardous_material = item.hazardous_material ?? null;
+    }
     const json = JSON.stringify(review.shipment);
     if (json.length > 49000) throw new Error('The shipment has too many details for one sheet row.');
     sheet.getRange(review.row, 1).setValue(sheetText_(review.shipment.shipper.postal_code));

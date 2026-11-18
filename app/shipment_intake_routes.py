@@ -42,4 +42,5 @@ def extract_shipment(file: UploadFile = File(...)) -> ShipmentExtraction:
 
 @router.post("/shipment-intake/submit", dependencies=[Depends(require_intake_token)])
 def submit_shipment(review: ReviewedShipment) -> dict:
+    """Submit reviewed freight after confirming hazmat status and dimension units."""
     return submit_to_tfww(review)

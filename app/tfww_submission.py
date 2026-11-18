@@ -39,11 +39,19 @@ class ReviewedShipment(BaseModel):
     def support_existing_rows(cls, value):
         if not isinstance(value, dict):
             return value
-        return {
-            name: {"email": None, "is_residential": None, **data}
-            if name in {"shipper", "consignee"} and isinstance(data, dict) else data
-            for name, data in value.items()
-        }
+        shipment = dict(value)
+        for role in ("shipper", "consignee"):
+            address = shipment.get(role)
+            if isinstance(address, dict):
+                shipment[role] = {"email": None, "is_residential": None, **address}
+        items = shipment.get("items")
+        if isinstance(items, list):
+            shipment["items"] = [
+                {"dimension_uom": None, "hazardous_material": None, **item}
+                if isinstance(item, dict) else item
+                for item in items
+            ]
+        return shipment
 
 
 def map_address(address: Address, *, residential: bool = False) -> dict:
@@ -101,6 +109,9 @@ def build_payload(review: ReviewedShipment, day: str) -> dict:
         except ValueError:
             freight_class = None
             errors.append(f"Commodity {index} freight class must be a number from 50 to 500.")
+        quantity_unit = (item.quantity_uom or "").strip()
+        if quantity_unit.lower() in {"pallet", "pallets", "plt"}:
+            quantity_unit = "PLT"
         mapped = {
             "Id": str(uuid4()),
             "Description": item.description,
@@ -108,7 +119,7 @@ def build_payload(review: ReviewedShipment, day: str) -> dict:
             "NmfcCode": item.nmfc,
             "HazardousMaterial": item.hazardous_material,
             "Weights": {"Actual": item.weight, "Uom": item.weight_uom},
-            "Quantities": {"Actual": item.quantity, "Uom": item.quantity_uom},
+            "Quantities": {"Actual": item.quantity, "Uom": quantity_unit},
         }
         dimensions = (item.length, item.width, item.height)
         if any(value is not None for value in dimensions):
