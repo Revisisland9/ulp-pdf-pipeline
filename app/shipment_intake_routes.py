@@ -42,5 +42,5 @@ def extract_shipment(file: UploadFile = File(...)) -> ShipmentExtraction:
 
 @router.post("/shipment-intake/submit", dependencies=[Depends(require_intake_token)])
 def submit_shipment(review: ReviewedShipment) -> dict:
-    """Submit reviewed freight and fill blank country codes from postal prefixes."""
+    """Submit reviewed freight and fill blank country codes with USA or CANADA from postal prefixes."""
     return submit_to_tfww(review)

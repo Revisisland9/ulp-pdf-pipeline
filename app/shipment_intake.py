@@ -74,7 +74,7 @@ def resolve_country_code(address: Address) -> str | None:
     if prefix and prefix in "0123456789":
         return "USA"
     if "A" <= prefix <= "Z" or "a" <= prefix <= "z":
-        return "CA"
+        return "CANADA"
     return None
 
 
