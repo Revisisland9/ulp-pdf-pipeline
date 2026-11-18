@@ -17,30 +17,103 @@
     <input id="document" name="document" type="file" accept=".eml,.pdf,.png,.jpg,.jpeg" required>
     <button type="submit">Upload and extract</button>
   </form>
+  <button type="button" id="check">Check connection</button>
+  <p>Review the shipment details in column F, choose an account in column B, and select the shipment row.</p>
+  <button type="button" id="submit-tfww">Submit to TFWW</button>
   <p role="status" id="status"></p>
   <script>
-    const form = document.getElementById('upload');
-    const button = form.querySelector('button');
-    const status = document.getElementById('status');
+    (() => {
+      const form = document.getElementById('upload');
+      const uploadButton = form.querySelector('button');
+      const checkButton = document.getElementById('check');
+      const submitButton = document.getElementById('submit-tfww');
+      const statusText = document.getElementById('status');
 
-    form.addEventListener('submit', event => {
-      event.preventDefault();
-      if (button.disabled) return;
-      button.disabled = true;
-      status.textContent = 'Extracting shipment…';
-      google.script.run
-        .withSuccessHandler(result => {
-          form.reset();
-          button.disabled = false;
-          const review = result.hasZip ? '' : ' Enter the origin ZIP if available.';
-          status.textContent = 'Added row ' + result.row + '.' + review + ' Choose a TFWW account in column B.';
-        })
-        .withFailureHandler(error => {
-          button.disabled = false;
-          status.textContent = error.message || 'Upload failed.';
-        })
-        .uploadShipment(form);
-    });
+      function setBusy(busy) {
+        uploadButton.disabled = busy;
+        checkButton.disabled = busy;
+        submitButton.disabled = busy;
+      }
+
+      function showFailure(stage, error) {
+        setBusy(false);
+        statusText.textContent = stage + ': ' +
+          (error?.message || 'The browser could not complete the Apps Script request.');
+      }
+
+      checkButton.addEventListener('click', () => {
+        setBusy(true);
+        statusText.textContent = 'Checking Apps Script and Cloud Run…';
+        try {
+          google.script.run
+            .withSuccessHandler(message => {
+              setBusy(false);
+              statusText.textContent = message;
+            })
+            .withFailureHandler(error => showFailure('Connection check failed', error))
+            .checkUploadConnection();
+        } catch (error) {
+          showFailure('Could not start the connection check', error);
+        }
+      });
+
+      let selectedShipment;
+      submitButton.addEventListener('click', () => {
+        setBusy(true);
+        if (!selectedShipment) {
+          google.script.run
+            .withFailureHandler(error => showFailure('Submission', error))
+            .withSuccessHandler(selection => {
+              selectedShipment = selection;
+              setBusy(false);
+              submitButton.textContent = 'Confirm submission';
+              statusText.textContent = 'Send row ' + selection.row + ' (' +
+                selection.filename + ') to ' + selection.account + '?';
+            })
+            .selectedShipmentForSubmit();
+          return;
+        }
+        const selection = selectedShipment;
+        selectedShipment = undefined;
+        submitButton.textContent = 'Submit to TFWW';
+        statusText.textContent = 'Submitting to TFWW…';
+        google.script.run
+          .withSuccessHandler(result => {
+            setBusy(false);
+            statusText.textContent = 'Row ' + result.row + ': ' + result.status +
+              '. See column G for the result.';
+          })
+          .withFailureHandler(error => showFailure('Submission', error))
+          .submitSelectedShipment(selection);
+      });
+
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        if (uploadButton.disabled) return;
+        const file = form.elements.namedItem('document').files[0];
+        if (!file || !file.size || file.size > 20 * 1024 * 1024) {
+          statusText.textContent = 'Choose a nonempty file up to 20 MiB.';
+          return;
+        }
+
+        setBusy(true);
+        statusText.textContent = 'Sending the file to Apps Script…';
+        try {
+          google.script.run
+            .withSuccessHandler(result => {
+              form.reset();
+              setBusy(false);
+              const review = result.hasZip ? '' : ' Enter the origin ZIP if available.';
+              statusText.textContent = 'Added row ' + result.row + '.' + review +
+                ' Choose a TFWW account in column B.';
+            })
+            .withFailureHandler(error => showFailure('Upload failed', error))
+            .uploadShipment(form);
+        } catch (error) {
+          showFailure('Could not start the upload', error);
+        }
+      });
+    })();
   </script>
 </body>
 </html>

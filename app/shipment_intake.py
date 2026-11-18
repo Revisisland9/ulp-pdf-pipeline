@@ -165,7 +165,7 @@ def _normalize_unit(value: str | None) -> str:
     return UNIT_ALIASES.get(unit, unit)
 
 
-def _validate(
+def validate_shipment(
     shipment: ShipmentFields, *, require_freight_class: bool, require_nmfc: bool
 ) -> list[str]:
     errors = []
@@ -243,7 +243,7 @@ def parse_document_to_shipment(
     if response.status != "completed" or not response.output_text:
         raise RuntimeError("OpenAI did not return a completed shipment extraction.")
     fields = ShipmentFields.model_validate_json(response.output_text)
-    errors = _validate(fields, require_freight_class=require_freight_class, require_nmfc=require_nmfc)
+    errors = validate_shipment(fields, require_freight_class=require_freight_class, require_nmfc=require_nmfc)
     shipment = fields.model_dump()
     shipment["warnings"] = list(dict.fromkeys(warnings + fields.warnings))
     return ShipmentExtraction(
