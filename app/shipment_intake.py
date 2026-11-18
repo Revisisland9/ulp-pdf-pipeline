@@ -66,6 +66,18 @@ class Address(Schema):
     is_residential: bool | None
 
 
+def resolve_country_code(address: Address) -> str | None:
+    """Use the program's postal prefix rule when the country is blank."""
+    if address.country_code and address.country_code.strip():
+        return address.country_code.strip()
+    prefix = (address.postal_code or "").strip()[:1]
+    if prefix and prefix in "0123456789":
+        return "USA"
+    if "A" <= prefix <= "Z" or "a" <= prefix <= "z":
+        return "CA"
+    return None
+
+
 class Reference(Schema):
     load_id: str | None
     sales_order: str | None

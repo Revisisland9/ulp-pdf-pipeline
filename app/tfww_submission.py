@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from pydantic import BaseModel, field_validator
 
-from app.shipment_intake import Address, ShipmentFields, validate_shipment
+from app.shipment_intake import Address, ShipmentFields, resolve_country_code, validate_shipment
 
 ACCOUNTS = {
     "Covenant": (
@@ -63,7 +63,7 @@ def map_address(address: Address, *, residential: bool = False) -> dict:
         "City": address.city,
         "StateProvince": address.state,
         "PostalCode": address.postal_code,
-        "CountryCode": address.country_code,
+        "CountryCode": resolve_country_code(address),
         "Contact": {
             "Name": address.contact_name or "",
             "Phone": address.phone or "",
@@ -77,9 +77,12 @@ def build_payload(review: ReviewedShipment, day: str) -> dict:
     errors = validate_shipment(shipment, require_freight_class=True, require_nmfc=True)
     for role in ("shipper", "consignee"):
         address = getattr(shipment, role)
-        for field in ("name", "address1", "city", "state", "country_code"):
+        for field in ("name", "address1", "city", "state"):
             if not (getattr(address, field) or "").strip():
                 errors.append(f"{role.capitalize()} {field} is required.")
+
+        if not resolve_country_code(address):
+            errors.append(f"{role.capitalize()} country_code is required.")
 
     reference = shipment.reference
     candidates = [(reference.load_id, "Load ID"), (reference.sales_order, "Sales Order")]
