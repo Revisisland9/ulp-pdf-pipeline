@@ -235,3 +235,43 @@ function submitSelectedShipment(selection) {
     lock.releaseLock();
   }
 }
+
+function loadShipmentForReview() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const range = sheet.getActiveRange();
+  if (sheet.getName() !== INTAKE_SHEET || !range || range.getNumRows() !== 1 || range.getRow() < 2) {
+    throw new Error('Select one shipment row on the Shipments tab.');
+  }
+  const row = range.getRow();
+  const [zip, , filename, status, notes, review, , attempt] =
+    sheet.getRange(row, 1, 1, HEADERS.length).getDisplayValues()[0];
+  if (attempt || ['SUBMITTING', 'SUBMITTED', 'CHECK_TFWW'].includes(status)) {
+    throw new Error('This row has a submission attempt. Check the TFWW result.');
+  }
+  if (!review) throw new Error('This row has no shipment details. Upload the source document again.');
+  const shipment = JSON.parse(review);
+  shipment.shipper.postal_code = zip || null;
+  return {row, filename, notes, shipment, original: review, originalZip: zip};
+}
+
+function saveShipmentReview(review) {
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(10000);
+  try {
+    const current = loadShipmentForReview();
+    if (current.row !== review.row || current.filename !== review.filename ||
+        current.original !== review.original || current.originalZip !== review.originalZip) {
+      throw new Error('The selected row or shipment changed. Open it again before saving.');
+    }
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    const json = JSON.stringify(review.shipment);
+    if (json.length > 49000) throw new Error('The shipment has too many details for one sheet row.');
+    sheet.getRange(review.row, 1).setValue(sheetText_(review.shipment.shipper.postal_code));
+    sheet.getRange(review.row, 4).setValue('REVIEW_REQUIRED');
+    sheet.getRange(review.row, 6).setValue(json);
+    SpreadsheetApp.flush();
+    return review.row;
+  } finally {
+    lock.releaseLock();
+  }
+}

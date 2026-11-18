@@ -8,6 +8,9 @@
     input { max-width: 100%; }
     button { background: #174ea6; color: white; border: 0; border-radius: 6px; padding: 9px 14px; }
     button:disabled { opacity: .6; }
+    fieldset { margin: 12px 0; border: 1px solid #dadce0; }
+    fieldset label { margin-bottom: 6px; }
+    fieldset input, fieldset select { box-sizing: border-box; width: 100%; margin: 4px 0 8px; }
     [role=status] { line-height: 1.5; }
   </style>
 </head>
@@ -18,21 +21,30 @@
     <button type="submit">Upload and extract</button>
   </form>
   <button type="button" id="check">Check connection</button>
-  <p>Review the shipment details in column F, choose an account in column B, and select the shipment row.</p>
+  <p>Select a shipment row to review its details. Choose a TFWW account in column B before submitting.</p>
+  <button type="button" id="review-row">Review selected row</button>
   <button type="button" id="submit-tfww">Submit to TFWW</button>
   <p role="status" id="status"></p>
+  <form id="review" hidden>
+    <div id="review-fields"></div>
+    <button type="submit">Save reviewed fields</button>
+  </form>
   <script>
     (() => {
       const form = document.getElementById('upload');
       const uploadButton = form.querySelector('button');
       const checkButton = document.getElementById('check');
       const submitButton = document.getElementById('submit-tfww');
+      const reviewButton = document.getElementById('review-row');
+      const reviewForm = document.getElementById('review');
+      const reviewFields = document.getElementById('review-fields');
       const statusText = document.getElementById('status');
 
       function setBusy(busy) {
         uploadButton.disabled = busy;
         checkButton.disabled = busy;
-        submitButton.disabled = busy;
+        submitButton.disabled = busy || !reviewForm.hidden;
+        reviewButton.disabled = busy;
       }
 
       function showFailure(stage, error) {
@@ -55,6 +67,99 @@
         } catch (error) {
           showFailure('Could not start the connection check', error);
         }
+      });
+
+      let review;
+      const addressFields = {
+        name: 'Name', address1: 'Street address', address2: 'Suite or unit',
+        city: 'City', state: 'State or province', postal_code: 'Postal code',
+        country_code: 'Country code', contact_name: 'Contact name',
+        phone: 'Contact phone', email: 'Contact email', is_residential: 'Residential'
+      };
+      const itemFields = {
+        description: 'Description', quantity: 'Quantity', quantity_uom: 'Quantity unit',
+        weight: 'Total row weight', weight_uom: 'Weight unit', length: 'Length', width: 'Width',
+        height: 'Height', dimension_uom: 'Dimension unit', freight_class: 'Freight class',
+        nmfc: 'NMFC code', hazardous_material: 'Hazardous material'
+      };
+      const numeric = ['quantity', 'weight', 'length', 'width', 'height'];
+
+      function addFields(title, record, fields) {
+        const group = document.createElement('fieldset');
+        const legend = document.createElement('legend');
+        legend.textContent = title;
+        group.append(legend);
+        for (const [key, title] of Object.entries(fields)) {
+          const label = document.createElement('label');
+          label.textContent = title;
+          const boolean = ['is_residential', 'hazardous_material'].includes(key);
+          const input = document.createElement(boolean ? 'select' : 'input');
+          if (boolean) {
+            input.add(new Option('Not confirmed', ''));
+            input.add(new Option('Yes', 'true'));
+            input.add(new Option('No', 'false'));
+          } else if (numeric.includes(key)) {
+            input.type = 'number';
+            input.step = 'any';
+          }
+          input.value = record[key] ?? '';
+          input.addEventListener('input', () => {
+            record[key] = input.value.trim() === '' ? null
+              : boolean ? input.value === 'true'
+              : numeric.includes(key) ? input.valueAsNumber : input.value.trim();
+          });
+          label.append(input);
+          group.append(label);
+        }
+        reviewFields.append(group);
+      }
+
+      reviewButton.addEventListener('click', () => {
+        selectedShipment = undefined;
+        submitButton.textContent = 'Submit to TFWW';
+        setBusy(true);
+        google.script.run
+          .withFailureHandler(error => showFailure('Review', error))
+          .withSuccessHandler(result => {
+            review = result;
+            reviewFields.replaceChildren();
+            const shipment = result.shipment;
+            addFields('References', shipment.reference, {
+              load_id: 'Load ID', sales_order: 'Sales order', purchase_order: 'Purchase order'
+            });
+            addFields('Shipper', shipment.shipper, addressFields);
+            addFields('Consignee', shipment.consignee, addressFields);
+            shipment.items.forEach((item, index) => addFields('Commodity ' + (index + 1), item, itemFields));
+            const services = {descriptions: shipment.source_services.join(', ')};
+            addFields('Services', services, {descriptions: 'Service descriptions, separated by commas'});
+            reviewFields.lastElementChild.addEventListener('input', () => {
+              shipment.source_services = (services.descriptions || '').split(',').map(value => value.trim()).filter(Boolean);
+            });
+            reviewForm.hidden = false;
+            setBusy(false);
+            statusText.textContent = 'Reviewing row ' + result.row + ' (' + result.filename + '). ' + result.notes;
+          })
+          .loadShipmentForReview();
+      });
+
+      reviewForm.addEventListener('submit', event => {
+        event.preventDefault();
+        const save = reviewForm.querySelector('button');
+        if (save.disabled) return;
+        save.disabled = true;
+        setBusy(true);
+        google.script.run
+          .withFailureHandler(error => {
+            save.disabled = false;
+            showFailure('Save review', error);
+          })
+          .withSuccessHandler(row => {
+            reviewForm.hidden = true;
+            save.disabled = false;
+            setBusy(false);
+            statusText.textContent = 'Saved reviewed details for row ' + row + '.';
+          })
+          .saveShipmentReview(review);
       });
 
       let selectedShipment;

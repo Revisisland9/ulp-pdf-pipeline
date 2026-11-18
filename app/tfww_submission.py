@@ -8,7 +8,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.shipment_intake import Address, ShipmentFields, validate_shipment
 
@@ -34,10 +34,21 @@ class ReviewedShipment(BaseModel):
     account: str
     shipment: ShipmentFields
 
+    @field_validator("shipment", mode="before")
+    @classmethod
+    def support_existing_rows(cls, value):
+        if not isinstance(value, dict):
+            return value
+        return {
+            name: {"email": None, "is_residential": None, **data}
+            if name in {"shipper", "consignee"} and isinstance(data, dict) else data
+            for name, data in value.items()
+        }
+
 
 def map_address(address: Address, *, residential: bool = False) -> dict:
     return {
-        "IsResidential": residential,
+        "IsResidential": residential or address.is_residential is True,
         "Name": address.name,
         "AddressLine1": address.address1,
         "AddressLine2": address.address2 or "",
@@ -48,7 +59,7 @@ def map_address(address: Address, *, residential: bool = False) -> dict:
         "Contact": {
             "Name": address.contact_name or "",
             "Phone": address.phone or "",
-            "Email": "",
+            "Email": address.email or "",
         },
     }
 
@@ -109,14 +120,16 @@ def build_payload(review: ReviewedShipment, day: str) -> dict:
                     "Uom": item.dimension_uom,
                 }
         items.append(mapped)
-    if errors:
-        raise HTTPException(422, errors)
-
-    _, _, name, street, city, zipcode = ACCOUNTS[review.account]
     services = dict.fromkeys(
         SERVICE_CODES[label.strip().lower()] for label in shipment.source_services
         if label.strip().lower() in SERVICE_CODES
     )
+    if shipment.consignee.is_residential is False and "RES1" in services:
+        errors.append("Destination is marked non-residential and includes Residential service.")
+    if errors:
+        raise HTTPException(422, errors)
+
+    _, _, name, street, city, zipcode = ACCOUNTS[review.account]
     payload = {
         "Status": "Pending",
         "ReferenceNumbers": references,

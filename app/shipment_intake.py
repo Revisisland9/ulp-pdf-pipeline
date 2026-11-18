@@ -32,6 +32,15 @@ different shipments appear, flag the ambiguity and leave conflicting fields null
 Return null for absent, illegible, or uncertain values and describe meaningful
 gaps in warnings. Use empty arrays when there are no items or services. Never guess
 postal codes, dimensions, dates, references, freight class, NMFC, or hazmat status.
+Look for origin in Ship From, Pickup, Shipper, or Origin blocks and for destination
+in Ship To, Deliver To, Delivery, Consignee, or Destination blocks. Scan the entire
+document, including address blocks in images and tables. Extract street number and
+street name into address1, suite or unit into address2, then separately capture the
+city, state, postal code and country. Keep billing and payment addresses out of
+shipper and consignee. Capture labeled contact names, phone numbers and email
+addresses for each location. Set is_residential only when the location type is clear.
+Recognize explicit non-hazmat labels or checked No boxes as false and explicit
+hazmat labels or checked Yes boxes as true. Use null when the source is silent.
 Keep original commodity rows and service descriptions. Weight is the visible
 total for a commodity row, never per-piece weight. Capture only explicitly shown
 shipment totals, without calculating or converting them. Preserve unit labels.
@@ -53,6 +62,8 @@ class Address(Schema):
     country_code: str | None
     contact_name: str | None
     phone: str | None
+    email: str | None
+    is_residential: bool | None
 
 
 class Reference(Schema):
