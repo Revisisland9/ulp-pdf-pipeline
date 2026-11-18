@@ -102,8 +102,8 @@
             input.type = 'number';
             input.step = 'any';
           }
-          input.value = record[key] ?? '';
-          input.addEventListener('input', () => {
+          input.value = String(record[key] ?? '');
+          input.addEventListener(boolean ? 'change' : 'input', () => {
             record[key] = input.value.trim() === '' ? null
               : boolean ? input.value === 'true'
               : numeric.includes(key) ? input.valueAsNumber : input.value.trim();
@@ -159,7 +159,7 @@
             setBusy(false);
             statusText.textContent = 'Saved reviewed details for row ' + row + '.';
           })
-          .saveShipmentReview(review);
+          .saveShipmentReview(JSON.stringify(review));
       });
 
       let selectedShipment;

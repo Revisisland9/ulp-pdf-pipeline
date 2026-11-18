@@ -254,7 +254,8 @@ function loadShipmentForReview() {
   return {row, filename, notes, shipment, original: review, originalZip: zip};
 }
 
-function saveShipmentReview(review) {
+function saveShipmentReview(reviewJson) {
+  const review = JSON.parse(reviewJson);
   const lock = LockService.getDocumentLock();
   lock.waitLock(10000);
   try {

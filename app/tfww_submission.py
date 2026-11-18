@@ -100,8 +100,8 @@ def build_payload(review: ReviewedShipment, day: str) -> dict:
         for field in ("description", "quantity_uom", "weight_uom"):
             if not (getattr(item, field) or "").strip():
                 errors.append(f"Commodity {index} {field} is required.")
-        if item.hazardous_material is None:
-            errors.append(f"Confirm hazardous_material for commodity {index}.")
+        if item.hazardous_material is True:
+            errors.append(f"Commodity {index} is marked hazardous. This workflow only submits non-hazardous freight.")
         try:
             freight_class = float(item.freight_class or "")
             if not 50 <= freight_class <= 500:
@@ -117,7 +117,7 @@ def build_payload(review: ReviewedShipment, day: str) -> dict:
             "Description": item.description,
             "FreightClasses": {"FreightClass": freight_class, "Type": ""},
             "NmfcCode": item.nmfc,
-            "HazardousMaterial": item.hazardous_material,
+            "HazardousMaterial": False,
             "Weights": {"Actual": item.weight, "Uom": item.weight_uom},
             "Quantities": {"Actual": item.quantity, "Uom": quantity_unit},
         }
