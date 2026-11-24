@@ -45,6 +45,16 @@ Keep original commodity rows and service descriptions. Weight is the visible
 total for a commodity row, never per-piece weight. When both Actual and Planned
 columns are present, use Actual quantity, its corresponding UOM, and Actual
 weight. Continuation images can show rows without repeating the column headers.
+For recognizable shipment item tables with the header cropped out, read the
+freight class cell immediately before NMFC. When the rows show two quantity/UOM
+pairs followed by two weight columns, read the second quantity/UOM pair and
+second weight column as Actual. If the layout is ambiguous, flag it for review.
+Screenshots or crops of the same item table can overlap, even within one image.
+When consecutive rows repeat at a crop boundary in the same order with matching
+item IDs, actual quantities and weights, and dimensions, extract the overlapping
+rows once. Keep distinct rows with the same item ID or description when their
+dimensions or other row details differ. Use the most complete view of a clipped
+row. Never remove rows solely to make the totals match.
 Read quantity_uom from the corresponding UOM column on every row. Capture only
 explicitly shown shipment totals, without calculating or converting them. Leave
 the total's unit null when the summary says only "qty" or "quantity"; these are
