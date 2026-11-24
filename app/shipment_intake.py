@@ -42,8 +42,14 @@ addresses for each location. Set is_residential only when the location type is c
 Recognize explicit non-hazmat labels or checked No boxes as false and explicit
 hazmat labels or checked Yes boxes as true. Use null when the source is silent.
 Keep original commodity rows and service descriptions. Weight is the visible
-total for a commodity row, never per-piece weight. Capture only explicitly shown
-shipment totals, without calculating or converting them. Preserve unit labels.
+total for a commodity row, never per-piece weight. When both Actual and Planned
+columns are present, use Actual quantity, its corresponding UOM, and Actual
+weight. Continuation images can show rows without repeating the column headers.
+Read quantity_uom from the corresponding UOM column on every row. Capture only
+explicitly shown shipment totals, without calculating or converting them. Leave
+the total's unit null when the summary says only "qty" or "quantity"; these are
+field labels. Preserve unit labels and leave dimension_uom null unless a unit
+for those dimensions is visible in the source.
 Keep postal codes, references, class and NMFC as strings.
 """
 
@@ -214,10 +220,18 @@ def validate_shipment(
         values = [getattr(item, field) for item in shipment.items]
         row_units = {_normalize_unit(getattr(item, f"{field}_uom")) for item in shipment.items}
         total_unit = _normalize_unit(getattr(shipment, f"expected_total_{field}_uom"))
+        if field == "quantity" and total_unit.rstrip(".") in {"qty", "quantity"}:
+            total_unit = ""
         if not values or any(value is None or value <= 0 for value in values):
             errors.append(f"Cannot reconcile source {field} total with missing or invalid commodity values.")
-        elif len(row_units) != 1 or "" in row_units or (total_unit and total_unit not in row_units):
-            errors.append(f"Cannot reconcile source {field} total across missing or incompatible units.")
+        elif "" in row_units:
+            missing = ", ".join(
+                str(index) for index, item in enumerate(shipment.items, 1)
+                if not _normalize_unit(getattr(item, f"{field}_uom"))
+            )
+            errors.append(f"Cannot reconcile source {field} total. Enter the {field} unit for commodity rows {missing}.")
+        elif len(row_units) != 1 or (total_unit and total_unit not in row_units):
+            errors.append(f"Cannot reconcile source {field} total across incompatible units.")
         else:
             calculated = sum(Decimal(str(value)) for value in values)
             if calculated != Decimal(str(expected)):

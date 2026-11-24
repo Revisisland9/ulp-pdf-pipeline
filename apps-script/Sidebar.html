@@ -94,6 +94,7 @@
           label.textContent = title;
           const boolean = ['is_residential', 'hazardous_material'].includes(key);
           const input = document.createElement(boolean ? 'select' : 'input');
+          input.name = key;
           if (boolean) {
             input.add(new Option('Not confirmed', ''));
             input.add(new Option('Yes', 'true'));
@@ -112,6 +113,34 @@
           group.append(label);
         }
         reviewFields.append(group);
+        return group;
+      }
+
+      function addDimensionUnitControl(items, groups) {
+        const missing = items.flatMap((item, index) =>
+          !item.dimension_uom && ['length', 'width', 'height'].every(key => item[key] > 0)
+            ? [groups[index].querySelector('[name="dimension_uom"]')] : []
+        );
+        if (!missing.length) return;
+
+        const label = document.createElement('label');
+        label.textContent = 'Confirmed unit for dimensions with a blank unit';
+        const input = document.createElement('input');
+        const apply = document.createElement('button');
+        apply.type = 'button';
+        apply.textContent = 'Fill blank dimension units';
+        apply.addEventListener('click', () => {
+          const unit = input.value.trim();
+          if (!unit) return;
+          for (const target of missing) {
+            if (target.value.trim()) continue;
+            target.value = unit;
+            target.dispatchEvent(new Event('input'));
+          }
+        });
+        label.append(input);
+        reviewFields.insertBefore(label, groups[0]);
+        reviewFields.insertBefore(apply, groups[0]);
       }
 
       reviewButton.addEventListener('click', () => {
@@ -129,7 +158,10 @@
             });
             addFields('Shipper', shipment.shipper, addressFields);
             addFields('Consignee', shipment.consignee, addressFields);
-            shipment.items.forEach((item, index) => addFields('Commodity ' + (index + 1), item, itemFields));
+            const commodityGroups = shipment.items.map((item, index) =>
+              addFields('Commodity ' + (index + 1), item, itemFields)
+            );
+            addDimensionUnitControl(shipment.items, commodityGroups);
             const services = {descriptions: shipment.source_services.join(', ')};
             addFields('Services', services, {descriptions: 'Service descriptions, separated by commas'});
             reviewFields.lastElementChild.addEventListener('input', () => {

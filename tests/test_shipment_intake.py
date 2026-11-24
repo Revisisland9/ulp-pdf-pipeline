@@ -96,9 +96,24 @@ class ShipmentIntakeTests(unittest.TestCase):
         self.assertIn("Commodity 1 NMFC is required.", shipment.errors)
         self.assertIn("Source quantity total 4 differs from commodity sum 3.0.", shipment.errors)
         self.assertIn(
-            "Cannot reconcile source weight total across missing or incompatible units.",
+            "Cannot reconcile source weight total across incompatible units.",
             shipment.errors,
         )
+
+    def test_quantity_summary_label_is_not_a_unit(self):
+        data = shipment_data()
+        data["expected_total_quantity_uom"] = "qty"
+        data["items"][1]["quantity_uom"] = "Pallets"
+        self.respond(data)
+        shipment = parse_document_to_shipment("shipment.pdf", PDF)
+        self.assertEqual(shipment.errors, [])
+
+        data["items"][1]["quantity_uom"] = None
+        self.respond(data)
+        shipment = parse_document_to_shipment("shipment.pdf", PDF)
+        self.assertEqual(shipment.errors, [
+            "Cannot reconcile source quantity total. Enter the quantity unit for commodity rows 2.",
+        ])
 
     def test_bad_upload_never_reaches_openai(self):
         with self.assertRaises(DocumentInputError):
