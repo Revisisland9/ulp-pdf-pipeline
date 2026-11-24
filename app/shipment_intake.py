@@ -7,7 +7,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import PurePath
 
-from pydantic import BaseModel, ConfigDict, FiniteFloat
+from pydantic import BaseModel, ConfigDict, FiniteFloat, model_validator
 
 from app.openai_extractor import MODEL, _get_client
 
@@ -108,6 +108,15 @@ class Commodity(Schema):
     freight_class: str | None
     nmfc: str | None
     hazardous_material: bool | None
+
+    @model_validator(mode="after")
+    def default_dimension_unit(self):
+        dimensions = (self.length, self.width, self.height)
+        if not (self.dimension_uom or "").strip() and all(
+            value is not None and value > 0 for value in dimensions
+        ):
+            self.dimension_uom = "in"
+        return self
 
 
 class ShipmentFields(Schema):

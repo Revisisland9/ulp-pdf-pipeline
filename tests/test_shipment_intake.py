@@ -115,6 +115,12 @@ class ShipmentIntakeTests(unittest.TestCase):
             "Cannot reconcile source quantity total. Enter the quantity unit for commodity rows 2.",
         ])
 
+    def test_dimension_unit_defaults_only_for_complete_dimensions(self):
+        item = {**shipment_data()["items"][0], "length": 30, "width": 30, "height": 42}
+        self.assertEqual(Commodity.model_validate(item).dimension_uom, "in")
+        self.assertEqual(Commodity.model_validate({**item, "dimension_uom": "cm"}).dimension_uom, "cm")
+        self.assertIsNone(Commodity.model_validate({**item, "height": None}).dimension_uom)
+
     def test_bad_upload_never_reaches_openai(self):
         with self.assertRaises(DocumentInputError):
             parse_document_to_shipment("shipment.pdf", PNG)
